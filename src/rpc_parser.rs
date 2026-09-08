@@ -7,12 +7,17 @@ use crate::core::events::DexEvent;
 use crate::grpc::types::EventTypeFilter;
 use crate::instr::read_pubkey_fast;
 use crate::transaction_cost::{parse_yellowstone_transaction_cost, TransactionCost};
+use smallvec::SmallVec;
 use solana_client::rpc_client::RpcClient;
 use solana_client::rpc_config::{RpcTransactionConfig, UiTransactionEncoding};
-use solana_client::rpc_response::{EncodedTransaction, UiInstruction, UiTransactionTokenBalance};
+use solana_client::rpc_response::{
+    EncodedTransaction, UiInstruction, UiTransactionStatusMeta, UiTransactionTokenBalance,
+};
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature;
-use solana_transaction_status::EncodedConfirmedTransactionWithStatusMeta;
+use solana_transaction_status::{
+    option_serializer::OptionSerializer, EncodedConfirmedTransactionWithStatusMeta,
+};
 use std::collections::HashMap;
 use yellowstone_grpc_proto::prelude::{
     CompiledInstruction, InnerInstruction, InnerInstructions, Message, MessageAddressTableLookup,
@@ -88,7 +93,7 @@ pub fn parse_rpc_transaction(
     rpc_tx: &EncodedConfirmedTransactionWithStatusMeta,
     filter: Option<&EventTypeFilter>,
 ) -> Result<Vec<DexEvent>, ParseError> {
-    let (grpc_meta, grpc_tx) = convert_rpc_to_grpc(rpc_tx)?;
+    let (grpc_meta, grpc_tx) = convert_rpc_to_grpc_for_parsing(rpc_tx)?;
     let signature = extract_grpc_signature(&grpc_tx)?;
     parse_converted_rpc_transaction(rpc_tx, grpc_meta, grpc_tx, signature, filter)
 }
@@ -106,7 +111,7 @@ pub fn parse_rpc_transaction_with_cost(
     rpc_tx: &EncodedConfirmedTransactionWithStatusMeta,
     filter: Option<&EventTypeFilter>,
 ) -> Result<ParsedRpcTransaction, ParseError> {
-    let (grpc_meta, grpc_tx) = convert_rpc_to_grpc(rpc_tx)?;
+    let (grpc_meta, grpc_tx) = convert_rpc_to_grpc_for_parsing(rpc_tx)?;
     let signature = extract_grpc_signature(&grpc_tx)?;
     let cost = parse_yellowstone_transaction_cost(&grpc_tx, &grpc_meta)
         .ok_or_else(|| ParseError::MissingField("transaction.message".to_string()))?;
@@ -118,7 +123,7 @@ pub fn parse_rpc_transaction_with_cost(
 pub fn parse_rpc_transaction_cost_with_signature(
     rpc_tx: &EncodedConfirmedTransactionWithStatusMeta,
 ) -> Result<(TransactionCost, Signature), ParseError> {
-    let (grpc_meta, grpc_tx) = convert_rpc_to_grpc(rpc_tx)?;
+    let (grpc_meta, grpc_tx) = convert_rpc_to_grpc_for_parsing(rpc_tx)?;
     let signature = extract_grpc_signature(&grpc_tx)?;
     let cost = parse_yellowstone_transaction_cost(&grpc_tx, &grpc_meta)
         .ok_or_else(|| ParseError::MissingField("transaction.message".to_string()))?;
@@ -193,8 +198,9 @@ fn parse_converted_rpc_transaction(
     }
 
     let needs_pumpfun = filter.map(EventTypeFilter::includes_pumpfun).unwrap_or(true);
-    let is_created_buy = needs_pumpfun
-        && crate::logs::optimized_matcher::detect_pumpfun_create(&grpc_meta.log_messages);
+    let log_messages = rpc_log_messages(rpc_tx);
+    let is_created_buy =
+        needs_pumpfun && crate::logs::optimized_matcher::detect_pumpfun_create(log_messages);
 
     // Parse instructions
     let instr_events =
@@ -216,10 +222,10 @@ fn parse_converted_rpc_transaction(
         pubkey: Pubkey,
     }
 
-    let mut active_program_stack: Vec<ActiveProgram<'_>> = Vec::with_capacity(8);
+    let mut active_program_stack: SmallVec<[ActiveProgram<'_>; 8]> = SmallVec::new();
     let mut log_events = Vec::new();
 
-    for log in &grpc_meta.log_messages {
+    for log in log_messages {
         if let Some((pid, depth)) = crate::logs::optimized_matcher::parse_invoke_info(log) {
             let pk = crate::grpc::program_ids::known_program_id(pid).unwrap_or_default();
             active_program_stack.truncate(depth - 1);
@@ -266,19 +272,111 @@ fn parse_converted_rpc_transaction(
     }
 
     let mut events = merge_log_and_instruction_events(log_events, instr_events);
-    fill_rpc_event_metadata(&mut events, &grpc_meta, &grpc_tx_opt);
+    fill_rpc_event_metadata(&mut events, rpc_tx, &grpc_meta, &grpc_tx_opt);
     Ok(events)
 }
 
 fn fill_rpc_event_metadata(
     events: &mut [DexEvent],
+    rpc_tx: &EncodedConfirmedTransactionWithStatusMeta,
     meta: &TransactionStatusMeta,
     transaction: &Option<Transaction>,
 ) {
-    for event in events.iter_mut() {
-        crate::core::common_filler::fill_token_balances(event, meta, transaction);
+    if let Some(rpc_meta) = rpc_tx.transaction.meta.as_ref() {
+        for event in events.iter_mut() {
+            fill_rpc_token_balances(event, rpc_meta, meta, transaction);
+        }
     }
     crate::grpc::transaction_meta::fill_recent_blockhash(events, transaction);
+}
+
+#[inline]
+fn fill_rpc_token_balances(
+    event: &mut DexEvent,
+    rpc_meta: &UiTransactionStatusMeta,
+    meta: &TransactionStatusMeta,
+    transaction: &Option<Transaction>,
+) {
+    let trade = match event {
+        DexEvent::PumpFunTrade(event)
+        | DexEvent::PumpFunBuy(event)
+        | DexEvent::PumpFunSell(event)
+        | DexEvent::PumpFunBuyExactSolIn(event) => event,
+        _ => return,
+    };
+
+    if let Some(user_index) = rpc_account_index(transaction, meta, &trade.user) {
+        trade.sol_balance = rpc_meta.post_balances.get(user_index).copied();
+    }
+
+    if trade.associated_user == Pubkey::default() {
+        return;
+    }
+
+    let matches_account = |balance: &UiTransactionTokenBalance| {
+        rpc_account_key(transaction, meta, balance.account_index as usize)
+            .is_some_and(|key| key.as_slice() == trade.associated_user.as_ref())
+    };
+
+    if let OptionSerializer::Some(balances) = &rpc_meta.post_token_balances {
+        if let Some(balance) = balances.iter().find(|balance| matches_account(balance)) {
+            trade.token_balance = balance.ui_token_amount.amount.parse().ok();
+            return;
+        }
+    }
+
+    if let OptionSerializer::Some(balances) = &rpc_meta.pre_token_balances {
+        if balances.iter().any(matches_account) {
+            trade.token_balance = Some(0);
+        }
+    }
+}
+
+#[inline]
+fn rpc_account_index(
+    transaction: &Option<Transaction>,
+    meta: &TransactionStatusMeta,
+    account: &Pubkey,
+) -> Option<usize> {
+    if *account == Pubkey::default() {
+        return None;
+    }
+
+    let message = transaction.as_ref()?.message.as_ref()?;
+    message
+        .account_keys
+        .iter()
+        .chain(&meta.loaded_writable_addresses)
+        .chain(&meta.loaded_readonly_addresses)
+        .position(|key| key.as_slice() == account.as_ref())
+}
+
+#[inline]
+fn rpc_account_key<'a>(
+    transaction: &'a Option<Transaction>,
+    meta: &'a TransactionStatusMeta,
+    index: usize,
+) -> Option<&'a Vec<u8>> {
+    let message = transaction.as_ref()?.message.as_ref()?;
+    let static_len = message.account_keys.len();
+    let writable_len = meta.loaded_writable_addresses.len();
+
+    if index < static_len {
+        message.account_keys.get(index)
+    } else if index < static_len + writable_len {
+        meta.loaded_writable_addresses.get(index - static_len)
+    } else {
+        meta.loaded_readonly_addresses.get(index - static_len - writable_len)
+    }
+}
+
+#[inline]
+fn rpc_log_messages(rpc_tx: &EncodedConfirmedTransactionWithStatusMeta) -> &[String] {
+    let Some(meta) = rpc_tx.transaction.meta.as_ref() else { return &[] };
+    match &meta.log_messages {
+        OptionSerializer::Some(messages) => messages,
+        _ => &[],
+    }
 }
 
 fn merge_log_and_instruction_events(
@@ -314,6 +412,22 @@ impl std::error::Error for ParseError {}
 
 pub fn convert_rpc_to_grpc(
     rpc_tx: &EncodedConfirmedTransactionWithStatusMeta,
+) -> Result<(TransactionStatusMeta, Transaction), ParseError> {
+    convert_rpc_to_grpc_impl(rpc_tx, true)
+}
+
+/// Converts only metadata that parsing and cost calculation must own; logs and balances stay
+/// borrowed from the original RPC response on these internal paths.
+#[inline]
+pub(crate) fn convert_rpc_to_grpc_for_parsing(
+    rpc_tx: &EncodedConfirmedTransactionWithStatusMeta,
+) -> Result<(TransactionStatusMeta, Transaction), ParseError> {
+    convert_rpc_to_grpc_impl(rpc_tx, false)
+}
+
+fn convert_rpc_to_grpc_impl(
+    rpc_tx: &EncodedConfirmedTransactionWithStatusMeta,
+    include_borrowed_metadata: bool,
 ) -> Result<(TransactionStatusMeta, Transaction), ParseError> {
     let rpc_meta = rpc_tx
         .transaction
@@ -357,24 +471,40 @@ pub fn convert_rpc_to_grpc(
     let mut grpc_meta = TransactionStatusMeta {
         err,
         fee: rpc_meta.fee,
-        pre_balances: rpc_meta.pre_balances.clone(),
-        post_balances: rpc_meta.post_balances.clone(),
+        pre_balances: if include_borrowed_metadata {
+            rpc_meta.pre_balances.clone()
+        } else {
+            Vec::new()
+        },
+        post_balances: if include_borrowed_metadata {
+            rpc_meta.post_balances.clone()
+        } else {
+            Vec::new()
+        },
         inner_instructions: Vec::new(),
-        log_messages: rpc_meta
-            .log_messages
-            .as_ref()
-            .map(|messages| messages.clone())
-            .unwrap_or_default(),
-        pre_token_balances: rpc_meta
-            .pre_token_balances
-            .as_ref()
-            .map(|balances| convert_token_balances(balances))
-            .unwrap_or_default(),
-        post_token_balances: rpc_meta
-            .post_token_balances
-            .as_ref()
-            .map(|balances| convert_token_balances(balances))
-            .unwrap_or_default(),
+        log_messages: if include_borrowed_metadata {
+            rpc_meta.log_messages.as_ref().map(|messages| messages.clone()).unwrap_or_default()
+        } else {
+            Vec::new()
+        },
+        pre_token_balances: if include_borrowed_metadata {
+            rpc_meta
+                .pre_token_balances
+                .as_ref()
+                .map(|balances| convert_token_balances(balances))
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        },
+        post_token_balances: if include_borrowed_metadata {
+            rpc_meta
+                .post_token_balances
+                .as_ref()
+                .map(|balances| convert_token_balances(balances))
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        },
         rewards: Vec::new(),
         loaded_writable_addresses,
         loaded_readonly_addresses,
@@ -399,7 +529,7 @@ pub fn convert_rpc_to_grpc(
             for ix in &inner.instructions {
                 if let UiInstruction::Compiled(compiled) = ix {
                     // Decode base58 data
-                    let data = bs58::decode(&compiled.data).into_vec().map_err(|e| {
+                    let data = base58_turbo::BITCOIN.decode(&compiled.data).map_err(|e| {
                         ParseError::ConversionError(format!(
                             "Failed to decode instruction data: {}",
                             e
@@ -716,14 +846,29 @@ mod tests {
     }
 
     #[test]
-    fn rpc_token_balances_fill_pumpfun_trade_without_an_rpc_balance_lookup() {
+    fn optimized_rpc_parsing_skips_borrowed_metadata_clones_but_fills_pumpfun_trade() {
         let user = Pubkey::new_unique();
         let token_account = Pubkey::new_unique();
         let rpc_tx = rpc_fixture(user, token_account);
-        let (meta, transaction) = convert_rpc_to_grpc(&rpc_tx).expect("convert RPC fixture");
+        let (public_meta, _) = convert_rpc_to_grpc(&rpc_tx).expect("convert RPC fixture");
 
-        assert_eq!(meta.pre_token_balances[0].ui_token_amount.as_ref().unwrap().amount, "10");
-        assert_eq!(meta.post_token_balances[0].ui_token_amount.as_ref().unwrap().amount, "35");
+        assert_eq!(
+            public_meta.pre_token_balances[0].ui_token_amount.as_ref().unwrap().amount,
+            "10"
+        );
+        assert_eq!(
+            public_meta.post_token_balances[0].ui_token_amount.as_ref().unwrap().amount,
+            "35"
+        );
+        assert_eq!(public_meta.pre_balances, [50_000, 2_039_280]);
+        assert_eq!(public_meta.post_balances, [40_000, 2_039_280]);
+        let (meta, transaction) =
+            convert_rpc_to_grpc_for_parsing(&rpc_tx).expect("convert RPC fixture for parsing");
+        assert!(meta.pre_balances.is_empty());
+        assert!(meta.post_balances.is_empty());
+        assert!(meta.log_messages.is_empty());
+        assert!(meta.pre_token_balances.is_empty());
+        assert!(meta.post_token_balances.is_empty());
         assert_eq!(meta.compute_units_consumed, Some(123));
         assert_eq!(meta.cost_units, Some(456));
 
@@ -732,15 +877,63 @@ mod tests {
             associated_user: token_account,
             ..Default::default()
         })];
-        fill_rpc_event_metadata(&mut events, &meta, &Some(transaction));
+        fill_rpc_event_metadata(&mut events, &rpc_tx, &meta, &Some(transaction));
 
         let DexEvent::PumpFunTrade(trade) = &events[0] else {
             panic!("expected PumpFun trade");
         };
-        assert_eq!(trade.pre_token_balance, Some(10));
-        assert_eq!(trade.post_token_balance, Some(35));
-        assert_eq!(trade.pre_sol_balance, Some(50_000));
-        assert_eq!(trade.post_sol_balance, Some(40_000));
+        assert_eq!(trade.token_balance, Some(35));
+        assert_eq!(trade.sol_balance, Some(40_000));
+    }
+
+    #[test]
+    fn optimized_rpc_balance_fill_handles_closed_token_accounts() {
+        let user = Pubkey::new_unique();
+        let token_account = Pubkey::new_unique();
+        let mut rpc_tx = rpc_fixture(user, token_account);
+        rpc_tx.transaction.meta.as_mut().unwrap().post_token_balances = OptionSerializer::None;
+        let (meta, transaction) =
+            convert_rpc_to_grpc_for_parsing(&rpc_tx).expect("convert RPC fixture for parsing");
+        let mut events = vec![DexEvent::PumpFunSell(PumpFunTradeEvent {
+            user,
+            associated_user: token_account,
+            ..Default::default()
+        })];
+
+        fill_rpc_event_metadata(&mut events, &rpc_tx, &meta, &Some(transaction));
+
+        let DexEvent::PumpFunSell(trade) = &events[0] else {
+            panic!("expected PumpFun sell");
+        };
+        assert_eq!(trade.token_balance, Some(0));
+        assert_eq!(trade.sol_balance, Some(40_000));
+    }
+
+    #[test]
+    fn optimized_rpc_balance_fill_keeps_malformed_amount_unknown() {
+        let user = Pubkey::new_unique();
+        let token_account = Pubkey::new_unique();
+        let mut rpc_tx = rpc_fixture(user, token_account);
+        let rpc_meta = rpc_tx.transaction.meta.as_mut().unwrap();
+        let OptionSerializer::Some(balances) = &mut rpc_meta.post_token_balances else {
+            panic!("post token balances");
+        };
+        balances[0].ui_token_amount.amount = "invalid".to_string();
+        let (meta, transaction) =
+            convert_rpc_to_grpc_for_parsing(&rpc_tx).expect("convert RPC fixture for parsing");
+        let mut events = vec![DexEvent::PumpFunBuy(PumpFunTradeEvent {
+            user,
+            associated_user: token_account,
+            ..Default::default()
+        })];
+
+        fill_rpc_event_metadata(&mut events, &rpc_tx, &meta, &Some(transaction));
+
+        let DexEvent::PumpFunBuy(trade) = &events[0] else {
+            panic!("expected PumpFun buy");
+        };
+        assert_eq!(trade.token_balance, None);
+        assert_eq!(trade.sol_balance, Some(40_000));
     }
 
     #[test]

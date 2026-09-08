@@ -33,6 +33,14 @@ pub mod discriminators {
         [228, 69, 165, 46, 81, 203, 154, 29, 156, 15, 119, 198, 29, 181, 221, 55];
     pub const CLOSE_POSITION: [u8; 16] =
         [228, 69, 165, 46, 81, 203, 154, 29, 20, 145, 144, 68, 143, 142, 214, 178];
+    pub const UPDATE_DELEGATE_PERMISSION: [u8; 16] =
+        [228, 69, 165, 46, 81, 203, 154, 29, 66, 188, 75, 151, 150, 232, 87, 93];
+    pub const WITHDRAW_DEAD_LIQUIDITY_REWARD: [u8; 16] =
+        [228, 69, 165, 46, 81, 203, 154, 29, 228, 66, 150, 195, 42, 62, 163, 13];
+    pub const CREATE_CONFIG: [u8; 16] =
+        [228, 69, 165, 46, 81, 203, 154, 29, 131, 207, 180, 174, 180, 73, 165, 54];
+    pub const CREATE_DYNAMIC_CONFIG: [u8; 16] =
+        [228, 69, 165, 46, 81, 203, 154, 29, 231, 197, 13, 164, 248, 213, 133, 152];
 }
 
 /// 主入口：根据 discriminator 解析事件
@@ -51,6 +59,20 @@ pub fn parse(disc: &[u8; 16], data: &[u8], metadata: EventMetadata) -> Option<De
         }
         discriminators::CREATE_POSITION => parse_create_position(data, metadata),
         discriminators::CLOSE_POSITION => parse_close_position(data, metadata),
+        discriminators::UPDATE_DELEGATE_PERMISSION => {
+            crate::logs::meteora_damm::parse_update_delegate_permission_from_data(data, metadata)
+        }
+        discriminators::WITHDRAW_DEAD_LIQUIDITY_REWARD => {
+            crate::logs::meteora_damm::parse_withdraw_dead_liquidity_reward_from_data(
+                data, metadata,
+            )
+        }
+        discriminators::CREATE_CONFIG => {
+            crate::logs::meteora_damm::parse_create_config_from_data(data, metadata)
+        }
+        discriminators::CREATE_DYNAMIC_CONFIG => {
+            crate::logs::meteora_damm::parse_create_dynamic_config_from_data(data, metadata)
+        }
         _ => None,
     }
 }

@@ -149,6 +149,17 @@ pub fn try_merge_events(
         (MeteoraDammV2InitializePool(b), MeteoraDammV2InitializePool(i)) => merge_generic(b, i),
         (MeteoraDammV2CreatePosition(b), MeteoraDammV2CreatePosition(i)) => merge_generic(b, i),
         (MeteoraDammV2ClosePosition(b), MeteoraDammV2ClosePosition(i)) => merge_generic(b, i),
+        (MeteoraDammV2UpdateDelegatePermission(b), MeteoraDammV2UpdateDelegatePermission(i)) => {
+            merge_generic(b, i)
+        }
+        (
+            MeteoraDammV2WithdrawDeadLiquidityReward(b),
+            MeteoraDammV2WithdrawDeadLiquidityReward(i),
+        ) => merge_generic(b, i),
+        (MeteoraDammV2CreateConfig(b), MeteoraDammV2CreateConfig(i)) => merge_generic(b, i),
+        (MeteoraDammV2CreateDynamicConfig(b), MeteoraDammV2CreateDynamicConfig(i)) => {
+            merge_generic(b, i)
+        }
 
         // ========== Meteora DLMM 系列 ==========
         (MeteoraDlmmSwap(b), MeteoraDlmmSwap(i)) => merge_dlmm_swap(b, i),

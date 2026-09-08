@@ -331,6 +331,10 @@ pub enum EventType {
     MeteoraDammV2InitializePool,
     MeteoraDammV2CreatePosition,
     MeteoraDammV2ClosePosition,
+    MeteoraDammV2UpdateDelegatePermission,
+    MeteoraDammV2WithdrawDeadLiquidityReward,
+    MeteoraDammV2CreateConfig,
+    MeteoraDammV2CreateDynamicConfig,
     // MeteoraDammV2ClaimPositionFee,
     // MeteoraDammV2InitializeReward,
     // MeteoraDammV2FundReward,
@@ -520,6 +524,10 @@ impl EventTypeFilter {
             EventType::MeteoraDammV2ClosePosition,
             EventType::MeteoraDammV2InitializePool,
             EventType::MeteoraDammV2RemoveLiquidity,
+            EventType::MeteoraDammV2UpdateDelegatePermission,
+            EventType::MeteoraDammV2WithdrawDeadLiquidityReward,
+            EventType::MeteoraDammV2CreateConfig,
+            EventType::MeteoraDammV2CreateDynamicConfig,
         ])
     }
 
@@ -726,6 +734,16 @@ pub fn event_type_from_dex_event(event: &crate::core::events::DexEvent) -> Optio
         DexEvent::MeteoraDammV2AddLiquidity(_) => Some(EventType::MeteoraDammV2AddLiquidity),
         DexEvent::MeteoraDammV2RemoveLiquidity(_) => Some(EventType::MeteoraDammV2RemoveLiquidity),
         DexEvent::MeteoraDammV2InitializePool(_) => Some(EventType::MeteoraDammV2InitializePool),
+        DexEvent::MeteoraDammV2UpdateDelegatePermission(_) => {
+            Some(EventType::MeteoraDammV2UpdateDelegatePermission)
+        }
+        DexEvent::MeteoraDammV2WithdrawDeadLiquidityReward(_) => {
+            Some(EventType::MeteoraDammV2WithdrawDeadLiquidityReward)
+        }
+        DexEvent::MeteoraDammV2CreateConfig(_) => Some(EventType::MeteoraDammV2CreateConfig),
+        DexEvent::MeteoraDammV2CreateDynamicConfig(_) => {
+            Some(EventType::MeteoraDammV2CreateDynamicConfig)
+        }
         DexEvent::MeteoraDbcSwap(_) => Some(EventType::MeteoraDbcSwap),
         DexEvent::MeteoraDbcInitializePool(_) => Some(EventType::MeteoraDbcInitializePool),
         DexEvent::MeteoraDbcCurveComplete(_) => Some(EventType::MeteoraDbcCurveComplete),

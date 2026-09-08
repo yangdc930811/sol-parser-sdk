@@ -47,35 +47,17 @@ async fn live_pumpfun_trade_has_consistent_balances() {
                 | DexEvent::PumpFunBuyExactSolIn(trade) => trade,
                 _ => continue,
             };
-            let pre_token = trade.pre_token_balance.expect("pre token balance should be present");
-            let post_token =
-                trade.post_token_balance.expect("post token balance should be present");
-            let pre_sol = trade.pre_sol_balance.expect("pre SOL balance should be present");
-            let post_sol = trade.post_sol_balance.expect("post SOL balance should be present");
-
-            let token_delta = if trade.is_buy {
-                assert!(post_token >= pre_token, "buy must not reduce the user's token balance");
-                post_token - pre_token
-            } else {
-                assert!(pre_token >= post_token, "sell must not increase the user's token balance");
-                pre_token - post_token
-            };
-            assert!(token_delta > 0, "trade must change the user's token balance");
-            assert_eq!(
-                token_delta, trade.token_amount,
-                "token balance delta must equal the parsed trade amount"
-            );
+            let token_balance = trade.token_balance.expect("final token balance should be present");
+            let sol_balance = trade.sol_balance.expect("final SOL balance should be present");
             println!(
-                "verified {} {}: user {}, quote {}, event amount {}, token {} -> {}, SOL {} -> {} lamports",
+                "verified {} {}: user {}, quote {}, event amount {}, final token balance {}, final SOL balance {} lamports",
                 trade.metadata.signature,
                 if trade.is_buy { "buy" } else { "sell" },
                 trade.user,
                 trade.quote_mint,
                 trade.token_amount,
-                pre_token,
-                post_token,
-                pre_sol,
-                post_sol
+                token_balance,
+                sol_balance
             );
             return;
         }

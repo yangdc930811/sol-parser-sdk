@@ -1,10 +1,7 @@
 //! Yellowstone `SubscribeUpdateTransaction` 单笔解析（logs ∥ instructions + 去重）。
 //! 从 [`super::client`] 抽出，供 crate 内与下游 streamer 复用。
 
-use std::collections::HashMap;
-
-use memchr::memmem;
-use once_cell::sync::Lazy;
+use smallvec::SmallVec;
 use solana_sdk::pubkey::Pubkey;
 use yellowstone_grpc_proto::prelude::{
     SubscribeUpdateTransaction, Transaction, TransactionStatusMeta,
@@ -14,8 +11,7 @@ use super::transaction_meta::try_yellowstone_signature;
 use super::types::EventTypeFilter;
 use crate::DexEvent;
 
-static PROGRAM_DATA_FINDER: Lazy<memmem::Finder> =
-    Lazy::new(|| memmem::Finder::new(b"Program data: "));
+const PROGRAM_DATA_PREFIX: &[u8] = b"Program data: ";
 
 struct ActiveProgram<'a> {
     encoded: &'a str,
@@ -184,27 +180,12 @@ fn parse_logs(
 ) -> Vec<DexEvent> {
     let mut outer_idx: i32 = -1;
     let mut inner_idx: i32 = -1;
-    let mut invokes: HashMap<Pubkey, Vec<(i32, i32)>> = HashMap::with_capacity(8);
-    let mut active_program_stack: Vec<ActiveProgram<'_>> = Vec::with_capacity(8);
+    let mut invokes = crate::core::invoke_context::InvokeContext::default();
+    let mut active_program_stack: SmallVec<[ActiveProgram<'_>; 8]> = SmallVec::new();
     let mut result = Vec::with_capacity(4);
 
     for log in logs {
-        if let Some((pid, depth)) = crate::logs::optimized_matcher::parse_invoke_info(log) {
-            if depth == 1 {
-                inner_idx = -1;
-                outer_idx += 1;
-            } else {
-                inner_idx += 1;
-            }
-            let pk = crate::grpc::program_ids::known_program_id(pid).unwrap_or_default();
-            active_program_stack.truncate(depth - 1);
-            active_program_stack.push(ActiveProgram { encoded: pid, pubkey: pk });
-            if crate::grpc::program_ids::needs_invoke_context(&pk) {
-                invokes.entry(pk).or_default().push((outer_idx, inner_idx));
-            }
-        }
-
-        if PROGRAM_DATA_FINDER.find(log.as_bytes()).is_some() {
+        if log.as_bytes().starts_with(PROGRAM_DATA_PREFIX) {
             let current_program = active_program_stack.last().map(|active| &active.pubkey);
             if let Some(mut e) = crate::logs::parse_log_with_program_id(
                 log,
@@ -218,15 +199,37 @@ fn parse_logs(
                 None,
                 current_program,
             ) {
-                crate::core::account_dispatcher::fill_accounts_with_owned_keys(
+                crate::core::account_dispatcher::fill_accounts_with_invoke_context(
                     &mut e,
                     meta,
                     transaction,
                     &invokes,
                 );
-                crate::core::common_filler::fill_data(&mut e, meta, transaction, &invokes);
+                crate::core::common_filler::fill_data_with_invoke_context(
+                    &mut e,
+                    meta,
+                    transaction,
+                    &invokes,
+                );
                 result.push(e);
             }
+            continue;
+        }
+
+        if let Some((pid, depth)) = crate::logs::optimized_matcher::parse_invoke_info(log) {
+            if depth == 1 {
+                inner_idx = -1;
+                outer_idx += 1;
+            } else {
+                inner_idx += 1;
+            }
+            let pk = crate::grpc::program_ids::known_program_id(pid).unwrap_or_default();
+            active_program_stack.truncate(depth - 1);
+            active_program_stack.push(ActiveProgram { encoded: pid, pubkey: pk });
+            if crate::grpc::program_ids::needs_invoke_context(&pk) {
+                invokes.push(pk, (outer_idx, inner_idx));
+            }
+            continue;
         }
 
         if let Some(pid) = crate::logs::optimized_matcher::parse_program_complete_info(log) {

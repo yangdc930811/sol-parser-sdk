@@ -47,6 +47,7 @@ pub use core::{
 pub use warmup::warmup_parser;
 
 // 导出 RPC 解析函数
+pub use grpc::{yellowstone_message_version, YellowstoneMessageVersion};
 pub use rpc_parser::{
     convert_rpc_to_grpc, parse_rpc_transaction, parse_rpc_transaction_cost_with_signature,
     parse_rpc_transaction_with_cost, parse_transaction_from_rpc, ParseError, ParsedRpcTransaction,

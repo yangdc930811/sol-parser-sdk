@@ -1,6 +1,6 @@
 [package]
 name = "sol-parser-sdk"
-version = "0.7.1"
+version = "0.7.2"
 edition = "2021"
 rust-version = "1.91"
 authors = ["William <byteblock6@gmail.com>", "sgxiang <sgxiang@gmail.com>", "wei <1415121722@qq.com>"]
@@ -55,6 +55,14 @@ name = "rpc_transaction"
 harness = false
 
 [[bench]]
+name = "rpc_pumpfun_transaction"
+harness = false
+
+[[bench]]
+name = "protocol_transaction_corpus"
+harness = false
+
+[[bench]]
 name = "micro_batch_buffer"
 harness = false
 
@@ -81,6 +89,8 @@ serde-big-array = "0.5.1"
 futures = "0.3.31"
 base64 = "0.22.1"
 base64-simd = "0.8"
+# RPC inner-instruction decoding; keep the portable safe implementation on every target.
+base58-turbo = { version = "0.3.0", default-features = false, features = ["std"] }
 bs58 = "0.5.1"
 memchr = "2.7"
 wincode = "=0.5.5"

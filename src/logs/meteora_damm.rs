@@ -4,6 +4,7 @@
 
 use super::utils::*;
 use crate::core::events::*;
+use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature;
 
 /// Meteora DAMM V2 事件 discriminator 常量
@@ -20,6 +21,10 @@ pub mod discriminators {
     pub const INITIALIZE_REWARD_EVENT: [u8; 8] = [129, 91, 188, 3, 246, 52, 185, 249];
     pub const FUND_REWARD_EVENT: [u8; 8] = [104, 233, 237, 122, 199, 191, 121, 85];
     pub const CLAIM_REWARD_EVENT: [u8; 8] = [218, 86, 147, 200, 235, 188, 215, 231];
+    pub const UPDATE_DELEGATE_PERMISSION_EVENT: [u8; 8] = [66, 188, 75, 151, 150, 232, 87, 93];
+    pub const WITHDRAW_DEAD_LIQUIDITY_REWARD_EVENT: [u8; 8] = [228, 66, 150, 195, 42, 62, 163, 13];
+    pub const CREATE_CONFIG_EVENT: [u8; 8] = [131, 207, 180, 174, 180, 73, 165, 54];
+    pub const CREATE_DYNAMIC_CONFIG_EVENT: [u8; 8] = [231, 197, 13, 164, 248, 213, 133, 152];
 }
 
 /// Mainnet upgrade that replaced `trading_fee/partner_fee` in `EvtSwap2` with
@@ -131,6 +136,35 @@ fn parse_structured_log(
         discriminators::CLAIM_REWARD_EVENT => {
             parse_claim_reward_event(data, signature, slot, tx_index, block_time_us, grpc_recv_us)
         }
+        discriminators::UPDATE_DELEGATE_PERMISSION_EVENT => parse_update_delegate_permission_event(
+            data,
+            signature,
+            slot,
+            tx_index,
+            block_time_us,
+            grpc_recv_us,
+        ),
+        discriminators::WITHDRAW_DEAD_LIQUIDITY_REWARD_EVENT => {
+            parse_withdraw_dead_liquidity_reward_event(
+                data,
+                signature,
+                slot,
+                tx_index,
+                block_time_us,
+                grpc_recv_us,
+            )
+        }
+        discriminators::CREATE_CONFIG_EVENT => {
+            parse_create_config_event(data, signature, slot, tx_index, block_time_us, grpc_recv_us)
+        }
+        discriminators::CREATE_DYNAMIC_CONFIG_EVENT => parse_create_dynamic_config_event(
+            data,
+            signature,
+            slot,
+            tx_index,
+            block_time_us,
+            grpc_recv_us,
+        ),
         _ => None,
     }
 }
@@ -873,6 +907,237 @@ fn parse_claim_reward_event(
     None
 }
 
+/// Parse `EvtUpdateDelegatePermission`.
+#[inline(always)]
+pub fn parse_update_delegate_permission_from_data(
+    data: &[u8],
+    metadata: EventMetadata,
+) -> Option<DexEvent> {
+    let mut offset = 0;
+    let position = read_pubkey(data, offset)?;
+    offset += 32;
+    let owner = read_pubkey(data, offset)?;
+    offset += 32;
+    let permission = read_u32_le(data, offset)?;
+    offset += 4;
+    let has_delegate = match read_u8(data, offset)? {
+        0 => false,
+        1 => true,
+        _ => return None,
+    };
+    offset += 1;
+    let delegate = if has_delegate { Some(read_pubkey(data, offset)?) } else { None };
+
+    Some(DexEvent::MeteoraDammV2UpdateDelegatePermission(
+        MeteoraDammV2UpdateDelegatePermissionEvent {
+            metadata,
+            position,
+            owner,
+            permission,
+            delegate,
+        },
+    ))
+}
+
+fn parse_update_delegate_permission_event(
+    data: &[u8],
+    signature: Signature,
+    slot: u64,
+    tx_index: u64,
+    block_time_us: Option<i64>,
+    grpc_recv_us: i64,
+) -> Option<DexEvent> {
+    let position = read_pubkey(data, 0)?;
+    let metadata =
+        create_metadata_simple(signature, slot, tx_index, block_time_us, position, grpc_recv_us);
+    parse_update_delegate_permission_from_data(data, metadata)
+}
+
+/// Parse `EvtWithdrawDeadLiquidityReward`.
+#[inline(always)]
+pub fn parse_withdraw_dead_liquidity_reward_from_data(
+    data: &[u8],
+    metadata: EventMetadata,
+) -> Option<DexEvent> {
+    let mut offset = 0;
+    let pool = read_pubkey(data, offset)?;
+    offset += 32;
+    let reward_mint = read_pubkey(data, offset)?;
+    offset += 32;
+    let amount = read_u64_le(data, offset)?;
+
+    Some(DexEvent::MeteoraDammV2WithdrawDeadLiquidityReward(
+        MeteoraDammV2WithdrawDeadLiquidityRewardEvent { metadata, pool, reward_mint, amount },
+    ))
+}
+
+fn parse_withdraw_dead_liquidity_reward_event(
+    data: &[u8],
+    signature: Signature,
+    slot: u64,
+    tx_index: u64,
+    block_time_us: Option<i64>,
+    grpc_recv_us: i64,
+) -> Option<DexEvent> {
+    let pool = read_pubkey(data, 0)?;
+    let metadata =
+        create_metadata_simple(signature, slot, tx_index, block_time_us, pool, grpc_recv_us);
+    parse_withdraw_dead_liquidity_reward_from_data(data, metadata)
+}
+
+fn parse_dynamic_fee_parameters(
+    data: &[u8],
+    offset: usize,
+) -> Option<(MeteoraDammV2DynamicFeeParameters, usize)> {
+    let mut offset = offset;
+    let bin_step = read_u16_le(data, offset)?;
+    offset += 2;
+    let bin_step_u128 = read_u128_le(data, offset)?;
+    offset += 16;
+    let filter_period = read_u16_le(data, offset)?;
+    offset += 2;
+    let decay_period = read_u16_le(data, offset)?;
+    offset += 2;
+    let reduction_factor = read_u16_le(data, offset)?;
+    offset += 2;
+    let max_volatility_accumulator = read_u32_le(data, offset)?;
+    offset += 4;
+    let variable_fee_control = read_u32_le(data, offset)?;
+    offset += 4;
+    Some((
+        MeteoraDammV2DynamicFeeParameters {
+            bin_step,
+            bin_step_u128,
+            filter_period,
+            decay_period,
+            reduction_factor,
+            max_volatility_accumulator,
+            variable_fee_control,
+        },
+        offset,
+    ))
+}
+
+/// Parse `EvtCreateConfig` (includes DAMM v2 0.2.4 `permission`).
+#[inline(always)]
+pub fn parse_create_config_from_data(data: &[u8], metadata: EventMetadata) -> Option<DexEvent> {
+    let mut offset = 0;
+    if data.len() < offset + 27 {
+        return None;
+    }
+    let mut base_fee_data = [0u8; 27];
+    base_fee_data.copy_from_slice(&data[offset..offset + 27]);
+    offset += 27;
+    let compounding_fee_bps = read_u16_le(data, offset)?;
+    offset += 2;
+    let padding = read_u8(data, offset)?;
+    offset += 1;
+    let has_dynamic_fee = match read_u8(data, offset)? {
+        0 => false,
+        1 => true,
+        _ => return None,
+    };
+    offset += 1;
+    let dynamic_fee = if has_dynamic_fee {
+        let (params, next) = parse_dynamic_fee_parameters(data, offset)?;
+        offset = next;
+        Some(params)
+    } else {
+        None
+    };
+    let vault_config_key = read_pubkey(data, offset)?;
+    offset += 32;
+    let pool_creator_authority = read_pubkey(data, offset)?;
+    offset += 32;
+    let activation_type = read_u8(data, offset)?;
+    offset += 1;
+    let sqrt_min_price = read_u128_le(data, offset)?;
+    offset += 16;
+    let sqrt_max_price = read_u128_le(data, offset)?;
+    offset += 16;
+    let collect_fee_mode = read_u8(data, offset)?;
+    offset += 1;
+    let index = read_u64_le(data, offset)?;
+    offset += 8;
+    let config = read_pubkey(data, offset)?;
+    offset += 32;
+    let permission = read_u128_le(data, offset)?;
+
+    Some(DexEvent::MeteoraDammV2CreateConfig(MeteoraDammV2CreateConfigEvent {
+        metadata,
+        base_fee_data,
+        compounding_fee_bps,
+        padding,
+        dynamic_fee,
+        vault_config_key,
+        pool_creator_authority,
+        activation_type,
+        sqrt_min_price,
+        sqrt_max_price,
+        collect_fee_mode,
+        index,
+        config,
+        permission,
+    }))
+}
+
+fn parse_create_config_event(
+    data: &[u8],
+    signature: Signature,
+    slot: u64,
+    tx_index: u64,
+    block_time_us: Option<i64>,
+    grpc_recv_us: i64,
+) -> Option<DexEvent> {
+    let metadata = create_metadata_simple(
+        signature,
+        slot,
+        tx_index,
+        block_time_us,
+        Pubkey::default(),
+        grpc_recv_us,
+    );
+    parse_create_config_from_data(data, metadata)
+}
+
+/// Parse `EvtCreateDynamicConfig` (includes DAMM v2 0.2.4 `permission`).
+#[inline(always)]
+pub fn parse_create_dynamic_config_from_data(
+    data: &[u8],
+    metadata: EventMetadata,
+) -> Option<DexEvent> {
+    let mut offset = 0;
+    let config = read_pubkey(data, offset)?;
+    offset += 32;
+    let pool_creator_authority = read_pubkey(data, offset)?;
+    offset += 32;
+    let index = read_u64_le(data, offset)?;
+    offset += 8;
+    let permission = read_u128_le(data, offset)?;
+
+    Some(DexEvent::MeteoraDammV2CreateDynamicConfig(MeteoraDammV2CreateDynamicConfigEvent {
+        metadata,
+        config,
+        pool_creator_authority,
+        index,
+        permission,
+    }))
+}
+
+fn parse_create_dynamic_config_event(
+    data: &[u8],
+    signature: Signature,
+    slot: u64,
+    tx_index: u64,
+    block_time_us: Option<i64>,
+    grpc_recv_us: i64,
+) -> Option<DexEvent> {
+    let config = read_pubkey(data, 0)?;
+    let metadata =
+        create_metadata_simple(signature, slot, tx_index, block_time_us, config, grpc_recv_us);
+    parse_create_dynamic_config_from_data(data, metadata)
+}
+
 /// 解析文本格式日志
 fn parse_text_log(
     _log: &str,
@@ -1135,5 +1400,157 @@ mod tests {
             .expect("inner liquidity-change event");
             assert_eq!(matches!(event, DexEvent::MeteoraDammV2AddLiquidity(_)), change_type == 0);
         }
+    }
+
+    #[test]
+    fn parses_update_delegate_permission_with_and_without_delegate() {
+        let mut with_delegate = Vec::new();
+        let position = push_pubkey(&mut with_delegate, 11);
+        let owner = push_pubkey(&mut with_delegate, 12);
+        with_delegate.extend_from_slice(&0x00ff_u32.to_le_bytes());
+        with_delegate.push(1);
+        let delegate = push_pubkey(&mut with_delegate, 13);
+
+        let event =
+            parse_update_delegate_permission_from_data(&with_delegate, EventMetadata::default())
+                .expect("delegate permission event");
+        let DexEvent::MeteoraDammV2UpdateDelegatePermission(event) = event else {
+            panic!("expected update delegate permission");
+        };
+        assert_eq!((event.position, event.owner, event.permission), (position, owner, 0x00ff));
+        assert_eq!(event.delegate, Some(delegate));
+
+        let mut without_delegate = Vec::new();
+        push_pubkey(&mut without_delegate, 21);
+        push_pubkey(&mut without_delegate, 22);
+        without_delegate.extend_from_slice(&0u32.to_le_bytes());
+        without_delegate.push(0);
+        let event =
+            parse_update_delegate_permission_from_data(&without_delegate, EventMetadata::default())
+                .expect("cleared delegate permission");
+        let DexEvent::MeteoraDammV2UpdateDelegatePermission(event) = event else {
+            panic!("expected update delegate permission");
+        };
+        assert_eq!(event.permission, 0);
+        assert_eq!(event.delegate, None);
+
+        without_delegate[68] = 2;
+        assert!(
+            parse_update_delegate_permission_from_data(&without_delegate, EventMetadata::default())
+                .is_none(),
+            "invalid Borsh option tag must be rejected"
+        );
+    }
+
+    #[test]
+    fn parses_withdraw_dead_liquidity_reward() {
+        let mut data = Vec::new();
+        let pool = push_pubkey(&mut data, 31);
+        let reward_mint = push_pubkey(&mut data, 32);
+        data.extend_from_slice(&777u64.to_le_bytes());
+
+        let event = parse_withdraw_dead_liquidity_reward_from_data(&data, EventMetadata::default())
+            .expect("dead liquidity reward");
+        let DexEvent::MeteoraDammV2WithdrawDeadLiquidityReward(event) = event else {
+            panic!("expected withdraw dead liquidity reward");
+        };
+        assert_eq!((event.pool, event.reward_mint, event.amount), (pool, reward_mint, 777));
+    }
+
+    #[test]
+    fn parses_create_config_with_permission_and_optional_dynamic_fee() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&[7u8; 27]); // base_fee_data
+        data.extend_from_slice(&250u16.to_le_bytes()); // compounding_fee_bps
+        data.push(0); // padding
+        data.push(0); // no dynamic fee
+        let vault = push_pubkey(&mut data, 41);
+        let authority = push_pubkey(&mut data, 42);
+        data.push(1); // activation_type
+        data.extend_from_slice(&11u128.to_le_bytes());
+        data.extend_from_slice(&22u128.to_le_bytes());
+        data.push(0); // collect_fee_mode
+        data.extend_from_slice(&9u64.to_le_bytes());
+        let config = push_pubkey(&mut data, 43);
+        data.extend_from_slice(&0xabcdu128.to_le_bytes());
+
+        let event =
+            parse_create_config_from_data(&data, EventMetadata::default()).expect("create config");
+        let DexEvent::MeteoraDammV2CreateConfig(event) = event else {
+            panic!("expected create config");
+        };
+        assert_eq!(event.base_fee_data, [7u8; 27]);
+        assert_eq!(event.compounding_fee_bps, 250);
+        assert!(event.dynamic_fee.is_none());
+        assert_eq!(
+            (event.vault_config_key, event.pool_creator_authority, event.config),
+            (vault, authority, config)
+        );
+        assert_eq!(event.permission, 0xabcd);
+
+        // Rebuild with dynamic fee present — splice after padding.
+        let mut rebuilt = Vec::new();
+        rebuilt.extend_from_slice(&[7u8; 27]);
+        rebuilt.extend_from_slice(&250u16.to_le_bytes());
+        rebuilt.push(0);
+        rebuilt.push(1);
+        rebuilt.extend_from_slice(&1u16.to_le_bytes());
+        rebuilt.extend_from_slice(&2u128.to_le_bytes());
+        rebuilt.extend_from_slice(&3u16.to_le_bytes());
+        rebuilt.extend_from_slice(&4u16.to_le_bytes());
+        rebuilt.extend_from_slice(&5u16.to_le_bytes());
+        rebuilt.extend_from_slice(&6u32.to_le_bytes());
+        rebuilt.extend_from_slice(&7u32.to_le_bytes());
+        // Append the remainder after the original Option=0 byte (offset 30).
+        rebuilt.extend_from_slice(&data[31..]);
+        let event = parse_create_config_from_data(&rebuilt, EventMetadata::default())
+            .expect("create config with dynamic fee");
+        let DexEvent::MeteoraDammV2CreateConfig(event) = event else {
+            panic!("expected create config");
+        };
+        let fee = event.dynamic_fee.expect("dynamic fee");
+        assert_eq!(
+            (
+                fee.bin_step,
+                fee.bin_step_u128,
+                fee.filter_period,
+                fee.decay_period,
+                fee.reduction_factor,
+                fee.max_volatility_accumulator,
+                fee.variable_fee_control
+            ),
+            (1, 2, 3, 4, 5, 6, 7)
+        );
+        assert_eq!(
+            (event.vault_config_key, event.pool_creator_authority, event.config),
+            (vault, authority, config)
+        );
+        assert_eq!(event.permission, 0xabcd);
+
+        let mut malformed = data.clone();
+        malformed[30] = 2;
+        assert!(
+            parse_create_config_from_data(&malformed, EventMetadata::default()).is_none(),
+            "invalid Borsh option tag must be rejected"
+        );
+    }
+
+    #[test]
+    fn parses_create_dynamic_config_with_permission() {
+        let mut data = Vec::new();
+        let config = push_pubkey(&mut data, 51);
+        let authority = push_pubkey(&mut data, 52);
+        data.extend_from_slice(&3u64.to_le_bytes());
+        data.extend_from_slice(&99u128.to_le_bytes());
+
+        let event = parse_create_dynamic_config_from_data(&data, EventMetadata::default())
+            .expect("create dynamic config");
+        let DexEvent::MeteoraDammV2CreateDynamicConfig(event) = event else {
+            panic!("expected create dynamic config");
+        };
+        assert_eq!(
+            (event.config, event.pool_creator_authority, event.index, event.permission),
+            (config, authority, 3, 99)
+        );
     }
 }

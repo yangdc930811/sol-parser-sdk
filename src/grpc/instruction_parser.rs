@@ -12,7 +12,6 @@ use crate::grpc::types::EventTypeFilter;
 use crate::instr::read_pubkey_fast;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature;
-use std::collections::HashMap;
 use yellowstone_grpc_proto::prelude::{Transaction, TransactionStatusMeta};
 
 #[derive(Debug)]
@@ -77,6 +76,9 @@ pub fn parse_instructions_enhanced(
         filter,
         is_created_buy,
     );
+    for event in &mut events {
+        crate::core::common_filler::fill_token_balances(event, meta, transaction);
+    }
     crate::grpc::transaction_meta::fill_recent_blockhash(&mut events, transaction);
     events
 }
@@ -115,15 +117,14 @@ pub(crate) fn parse_instructions_enhanced_with_created_buy(
     };
 
     let mut result = Vec::with_capacity(8);
-    let mut invokes: HashMap<Pubkey, Vec<(i32, i32)>> = HashMap::new();
-
+    let mut invokes = crate::core::invoke_context::InvokeContext::default();
     // 步骤 1: 解析所有主指令
     for (i, ix) in msg.instructions.iter().enumerate() {
         let pid = get_key(ix.program_id_index as usize)
             .map_or(Pubkey::default(), |k| read_pubkey_fast(k));
 
         if crate::grpc::program_ids::needs_invoke_context(&pid) {
-            invokes.entry(pid).or_default().push((i as i32, -1));
+            invokes.push(pid, (i as i32, -1));
         }
 
         // 解析主指令（8字节 discriminator）
@@ -159,7 +160,7 @@ pub(crate) fn parse_instructions_enhanced_with_created_buy(
                 .map_or(Pubkey::default(), |k| read_pubkey_fast(k));
 
             if crate::grpc::program_ids::needs_invoke_context(&pid) {
-                invokes.entry(pid).or_default().push((outer_idx as i32, j as i32));
+                invokes.push(pid, (outer_idx as i32, j as i32));
             }
 
             let event = parse_inner_compiled_instruction_if_supported(
@@ -202,20 +203,23 @@ pub(crate) fn parse_instructions_enhanced_with_created_buy(
     }
 
     // 步骤 3: 合并相关事件（instruction + inner instruction）
-    let mut merged = merge_instruction_events(result);
-    enrich_pumpfun_same_tx_post_merge(&mut merged);
+    let mut final_result = merge_instruction_events(result);
+    enrich_pumpfun_same_tx_post_merge(&mut final_result);
 
     // 步骤 4: 填充账户上下文（invokes 与 fill_data 均使用 Pubkey 键，无堆泄漏）
-    let mut final_result = Vec::with_capacity(merged.len());
-    for mut event in merged {
-        crate::core::account_dispatcher::fill_accounts_with_owned_keys(
-            &mut event,
+    for event in &mut final_result {
+        crate::core::account_dispatcher::fill_accounts_with_invoke_context(
+            event,
             meta,
             transaction,
             &invokes,
         );
-        crate::core::common_filler::fill_data(&mut event, meta, transaction, &invokes);
-        final_result.push(event);
+        crate::core::common_filler::fill_data_with_invoke_context(
+            event,
+            meta,
+            transaction,
+            &invokes,
+        );
     }
 
     final_result

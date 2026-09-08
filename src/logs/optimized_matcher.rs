@@ -30,8 +30,9 @@ static RAYDIUM_LAUNCHLAB_FINDER: Lazy<memmem::Finder> =
 static PROGRAM_FINDER: Lazy<memmem::Finder> = Lazy::new(|| memmem::Finder::new(b"Program"));
 static PROGRAM_DATA_FINDER: Lazy<memmem::Finder> =
     Lazy::new(|| memmem::Finder::new(b"Program data: "));
-static PUMPFUN_CREATE_FINDER: Lazy<memmem::Finder> =
-    Lazy::new(|| memmem::Finder::new(b"Program data: G3KpTd7rY3Y"));
+// The first ten base64 characters cover 60 discriminator bits. The next character's high four
+// bits complete the discriminator; its low two bits belong to the first payload byte.
+const PUMPFUN_CREATE_PREFIX: &[u8] = b"Program data: G3KpTd7rY3";
 static WHIRL_FINDER: Lazy<memmem::Finder> = Lazy::new(|| memmem::Finder::new(b"whirL"));
 static METEORA_FINDER: Lazy<memmem::Finder> = Lazy::new(|| memmem::Finder::new(b"meteora"));
 static METEORA_LB_FINDER: Lazy<memmem::Finder> = Lazy::new(|| memmem::Finder::new(b"LB"));
@@ -304,6 +305,14 @@ mod discriminators {
         u64::from_le_bytes([156, 15, 119, 198, 29, 181, 221, 55]);
     pub const METEORA_DAMM_CLOSE_POSITION: u64 =
         u64::from_le_bytes([20, 145, 144, 68, 143, 142, 214, 178]);
+    pub const METEORA_DAMM_UPDATE_DELEGATE_PERMISSION: u64 =
+        u64::from_le_bytes([66, 188, 75, 151, 150, 232, 87, 93]);
+    pub const METEORA_DAMM_WITHDRAW_DEAD_LIQUIDITY_REWARD: u64 =
+        u64::from_le_bytes([228, 66, 150, 195, 42, 62, 163, 13]);
+    pub const METEORA_DAMM_CREATE_CONFIG: u64 =
+        u64::from_le_bytes([131, 207, 180, 174, 180, 73, 165, 54]);
+    pub const METEORA_DAMM_CREATE_DYNAMIC_CONFIG: u64 =
+        u64::from_le_bytes([231, 197, 13, 164, 248, 213, 133, 152]);
 
     // Meteora DBC discriminators. Some values intentionally overlap DAMM V2,
     // so they must be routed with program context.
@@ -591,10 +600,14 @@ fn parse_log_optimized_inner(
         };
         return crate::logs::raydium_amm::parse_ray_log_swap(log, metadata);
     }
-    // Step 1: Find "Program data: " prefix using SIMD
+    // Standard Solana log lines start with the prefix. Keep the finder fallback for callers that
+    // pass decorated log text through the public parser.
     let log_bytes = log.as_bytes();
-    let pos = PROGRAM_DATA_FINDER.find(log_bytes)?;
-    let data_start = pos + 14; // "Program data: " length
+    let data_start = if log_bytes.starts_with(program_id_strings::PROGRAM_DATA.as_bytes()) {
+        program_id_strings::PROGRAM_DATA.len()
+    } else {
+        PROGRAM_DATA_FINDER.find(log_bytes)? + program_id_strings::PROGRAM_DATA.len()
+    };
 
     if log_bytes.len() <= data_start {
         return None;
@@ -602,7 +615,7 @@ fn parse_log_optimized_inner(
 
     // Step 2: Decode base64 ONCE. Normal swap logs stay on the stack; rare large
     // IDL events (for example pump-fees vectors) fall back to heap instead of being dropped.
-    const STACK_DECODE_CAP: usize = 2048;
+    const STACK_DECODE_CAP: usize = 512;
     let data_part = &log[data_start..];
     let trimmed = data_part.trim();
 
@@ -913,6 +926,20 @@ fn parse_log_optimized_inner(
         discriminators::METEORA_DAMM_CLOSE_POSITION => {
             crate::logs::meteora_damm::parse_close_position_from_data(data, metadata)
         }
+        discriminators::METEORA_DAMM_UPDATE_DELEGATE_PERMISSION => {
+            crate::logs::meteora_damm::parse_update_delegate_permission_from_data(data, metadata)
+        }
+        discriminators::METEORA_DAMM_WITHDRAW_DEAD_LIQUIDITY_REWARD => {
+            crate::logs::meteora_damm::parse_withdraw_dead_liquidity_reward_from_data(
+                data, metadata,
+            )
+        }
+        discriminators::METEORA_DAMM_CREATE_CONFIG => {
+            crate::logs::meteora_damm::parse_create_config_from_data(data, metadata)
+        }
+        discriminators::METEORA_DAMM_CREATE_DYNAMIC_CONFIG => {
+            crate::logs::meteora_damm::parse_create_dynamic_config_from_data(data, metadata)
+        }
 
         // NOTE: current Meteora DLMM discriminators overlap other Meteora
         // programs, so DLMM is routed in the program-scoped path.
@@ -1091,6 +1118,18 @@ fn program_scoped_discriminator_to_event_type(
             }
             discriminators::METEORA_DAMM_CLOSE_POSITION => {
                 Some(EventType::MeteoraDammV2ClosePosition)
+            }
+            discriminators::METEORA_DAMM_UPDATE_DELEGATE_PERMISSION => {
+                Some(EventType::MeteoraDammV2UpdateDelegatePermission)
+            }
+            discriminators::METEORA_DAMM_WITHDRAW_DEAD_LIQUIDITY_REWARD => {
+                Some(EventType::MeteoraDammV2WithdrawDeadLiquidityReward)
+            }
+            discriminators::METEORA_DAMM_CREATE_CONFIG => {
+                Some(EventType::MeteoraDammV2CreateConfig)
+            }
+            discriminators::METEORA_DAMM_CREATE_DYNAMIC_CONFIG => {
+                Some(EventType::MeteoraDammV2CreateDynamicConfig)
             }
             _ => None,
         },
@@ -1468,6 +1507,22 @@ fn parse_program_scoped_event(
                 discriminators::METEORA_DAMM_CLOSE_POSITION => {
                     crate::logs::meteora_damm::parse_close_position_from_data(data, metadata)
                 }
+                discriminators::METEORA_DAMM_UPDATE_DELEGATE_PERMISSION => {
+                    crate::logs::meteora_damm::parse_update_delegate_permission_from_data(
+                        data, metadata,
+                    )
+                }
+                discriminators::METEORA_DAMM_WITHDRAW_DEAD_LIQUIDITY_REWARD => {
+                    crate::logs::meteora_damm::parse_withdraw_dead_liquidity_reward_from_data(
+                        data, metadata,
+                    )
+                }
+                discriminators::METEORA_DAMM_CREATE_CONFIG => {
+                    crate::logs::meteora_damm::parse_create_config_from_data(data, metadata)
+                }
+                discriminators::METEORA_DAMM_CREATE_DYNAMIC_CONFIG => {
+                    crate::logs::meteora_damm::parse_create_dynamic_config_from_data(data, metadata)
+                }
                 _ => None,
             }
         }
@@ -1697,6 +1752,16 @@ fn discriminator_to_event_type(discriminator: u64) -> Option<EventType> {
             Some(EventType::MeteoraDammV2CreatePosition)
         }
         discriminators::METEORA_DAMM_CLOSE_POSITION => Some(EventType::MeteoraDammV2ClosePosition),
+        discriminators::METEORA_DAMM_UPDATE_DELEGATE_PERMISSION => {
+            Some(EventType::MeteoraDammV2UpdateDelegatePermission)
+        }
+        discriminators::METEORA_DAMM_WITHDRAW_DEAD_LIQUIDITY_REWARD => {
+            Some(EventType::MeteoraDammV2WithdrawDeadLiquidityReward)
+        }
+        discriminators::METEORA_DAMM_CREATE_CONFIG => Some(EventType::MeteoraDammV2CreateConfig),
+        discriminators::METEORA_DAMM_CREATE_DYNAMIC_CONFIG => {
+            Some(EventType::MeteoraDammV2CreateDynamicConfig)
+        }
         _ => None,
     }
 }
@@ -1706,7 +1771,11 @@ fn discriminator_to_event_type(discriminator: u64) -> Option<EventType> {
 // ============================================================================
 #[inline]
 pub fn detect_pumpfun_create(logs: &[String]) -> bool {
-    logs.iter().any(|log| PUMPFUN_CREATE_FINDER.find(log.as_bytes()).is_some())
+    logs.iter().any(|log| {
+        let bytes = log.as_bytes();
+        bytes.starts_with(PUMPFUN_CREATE_PREFIX)
+            && matches!(bytes.get(PUMPFUN_CREATE_PREFIX.len()), Some(b'Y' | b'Z' | b'a' | b'b'))
+    })
 }
 
 static INVOKE_FINDER: Lazy<memmem::Finder> = Lazy::new(|| memmem::Finder::new(b"invoke ["));
@@ -1745,8 +1814,8 @@ pub fn parse_invoke_info(log: &str) -> Option<(&str, usize)> {
 #[inline]
 pub fn parse_program_complete_info(log: &str) -> Option<&str> {
     let rest = log.strip_prefix("Program ")?;
-    if let Some(pos) = rest.find(" success") {
-        return Some(&rest[..pos]);
+    if let Some(program_id) = rest.strip_suffix(" success") {
+        return (!program_id.is_empty()).then_some(program_id);
     }
     if let Some(pos) = rest.find(" failed:") {
         return Some(&rest[..pos]);
@@ -1760,6 +1829,19 @@ mod tests {
     use crate::core::events::PumpFunTradeEvent;
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use solana_sdk::{pubkey::Pubkey, signature::Signature};
+
+    #[test]
+    fn pumpfun_create_detection_requires_canonical_program_data_prefix() {
+        for first_payload_byte in [0, 64, 128, 192] {
+            let mut raw = discriminators::PUMPFUN_CREATE.to_le_bytes().to_vec();
+            raw.push(first_payload_byte);
+            let create = vec![format!("Program data: {}", STANDARD.encode(raw))];
+            assert!(detect_pumpfun_create(&create));
+        }
+
+        let unrelated = vec!["Program log: Program data: G3KpTd7rY3Yrest".to_owned()];
+        assert!(!detect_pumpfun_create(&unrelated));
+    }
 
     #[test]
     fn program_scoped_launchlab_trade_is_not_parsed_as_pumpfun() {

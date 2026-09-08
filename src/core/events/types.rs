@@ -241,24 +241,16 @@ pub struct PumpFunTradeEvent {
     #[borsh(skip)]
     pub min_tokens_out: u64, // buy_exact*.args.min_tokens_out
 
-    // === Transaction balance fields (raw units, filled from Yellowstone transaction meta) ===
-    /// User's base-mint token balance before this transaction. `None` when transaction meta is
-    /// unavailable (for example, ShredStream events).
+    // === Post-transaction balances (raw units, filled from transaction meta) ===
+    /// User's base-mint token-account balance after this transaction. `None` when transaction
+    /// meta is unavailable (for example, ShredStream events).
     #[borsh(skip)]
-    #[serde(default)]
-    pub pre_token_balance: Option<u64>,
-    /// User's base-mint token balance after this transaction.
-    #[borsh(skip)]
-    #[serde(default)]
-    pub post_token_balance: Option<u64>,
-    /// User's native SOL balance in lamports before this transaction.
-    #[borsh(skip)]
-    #[serde(default)]
-    pub pre_sol_balance: Option<u64>,
+    #[serde(default, alias = "post_token_balance")]
+    pub token_balance: Option<u64>,
     /// User's native SOL balance in lamports after this transaction.
     #[borsh(skip)]
-    #[serde(default)]
-    pub post_sol_balance: Option<u64>,
+    #[serde(default, alias = "post_sol_balance")]
+    pub sol_balance: Option<u64>,
 
     // === 指令账户字段 (从指令账户填充，不在 Borsh 数据中) ===
     #[borsh(skip)]
@@ -2661,6 +2653,66 @@ pub struct MeteoraDammV2ClosePositionEvent {
     pub owner: Pubkey,             // 32 bytes
     pub position: Pubkey,          // 32 bytes
     pub position_nft_mint: Pubkey, // 32 bytes
+}
+
+/// Nested dynamic fee parameters from DAMM v2 `PoolFeeParameters`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct MeteoraDammV2DynamicFeeParameters {
+    pub bin_step: u16,
+    pub bin_step_u128: u128,
+    pub filter_period: u16,
+    pub decay_period: u16,
+    pub reduction_factor: u16,
+    pub max_volatility_accumulator: u32,
+    pub variable_fee_control: u32,
+}
+
+/// Meteora DAMM V2 Update Delegate Permission Event (IDL `EvtUpdateDelegatePermission`)
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MeteoraDammV2UpdateDelegatePermissionEvent {
+    pub metadata: EventMetadata,
+    pub position: Pubkey,
+    pub owner: Pubkey,
+    pub permission: u32,
+    pub delegate: Option<Pubkey>,
+}
+
+/// Meteora DAMM V2 Withdraw Dead Liquidity Reward Event (IDL `EvtWithdrawDeadLiquidityReward`)
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MeteoraDammV2WithdrawDeadLiquidityRewardEvent {
+    pub metadata: EventMetadata,
+    pub pool: Pubkey,
+    pub reward_mint: Pubkey,
+    pub amount: u64,
+}
+
+/// Meteora DAMM V2 Create Config Event (IDL `EvtCreateConfig`, includes 0.2.4 `permission`)
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MeteoraDammV2CreateConfigEvent {
+    pub metadata: EventMetadata,
+    pub base_fee_data: [u8; 27],
+    pub compounding_fee_bps: u16,
+    pub padding: u8,
+    pub dynamic_fee: Option<MeteoraDammV2DynamicFeeParameters>,
+    pub vault_config_key: Pubkey,
+    pub pool_creator_authority: Pubkey,
+    pub activation_type: u8,
+    pub sqrt_min_price: u128,
+    pub sqrt_max_price: u128,
+    pub collect_fee_mode: u8,
+    pub index: u64,
+    pub config: Pubkey,
+    pub permission: u128,
+}
+
+/// Meteora DAMM V2 Create Dynamic Config Event (IDL `EvtCreateDynamicConfig`)
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MeteoraDammV2CreateDynamicConfigEvent {
+    pub metadata: EventMetadata,
+    pub config: Pubkey,
+    pub pool_creator_authority: Pubkey,
+    pub index: u64,
+    pub permission: u128,
 }
 
 // ====================== Meteora DBC Events ======================

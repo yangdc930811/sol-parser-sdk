@@ -8,7 +8,7 @@ use solana_sdk::{pubkey, pubkey::Pubkey, transaction::VersionedTransaction};
 use solana_transaction_status::EncodedConfirmedTransactionWithStatusMeta;
 use yellowstone_grpc_proto::prelude::{InnerInstruction, Transaction, TransactionStatusMeta};
 
-use crate::rpc_parser::{convert_rpc_to_grpc, ParseError};
+use crate::rpc_parser::{convert_rpc_to_grpc_for_parsing, ParseError};
 
 const COMPUTE_BUDGET_PROGRAM_ID: Pubkey = pubkey!("ComputeBudget111111111111111111111111111111");
 const SYSTEM_PROGRAM_ID: Pubkey = pubkey!("11111111111111111111111111111111");
@@ -295,6 +295,12 @@ pub struct TransactionCost {
     pub compute_units_consumed: Option<u64>,
     pub compute_unit_limit: Option<u32>,
     pub compute_unit_price_micro_lamports: Option<u64>,
+    /// Requested maximum loaded account data in bytes. `None` means no explicit request.
+    #[serde(default)]
+    pub loaded_accounts_data_size_limit: Option<u32>,
+    /// Requested heap size in bytes. `None` means no explicit request (V1 uses 32 KiB).
+    #[serde(default)]
+    pub heap_size: Option<u32>,
     /// Requested priority fee, rounded up with Solana runtime semantics.
     pub priority_fee_lamports: Option<u64>,
     /// `true` when status metadata confirms the transaction succeeded.
@@ -318,6 +324,8 @@ impl TransactionCost {
 struct ScanState {
     compute_unit_limit: Option<u32>,
     compute_unit_price_micro_lamports: Option<u64>,
+    loaded_accounts_data_size_limit: Option<u32>,
+    heap_size: Option<u32>,
     direct_priority_fee_lamports: Option<u64>,
     is_v1: bool,
     seen_compute_budget_tags: u8,
@@ -328,10 +336,17 @@ struct ScanState {
 
 impl ScanState {
     #[inline]
-    fn with_v1_fields(compute_unit_limit: Option<u32>, priority_fee: Option<u64>) -> Self {
+    fn with_v1_fields(
+        compute_unit_limit: Option<u32>,
+        priority_fee: Option<u64>,
+        loaded_accounts_data_size_limit: Option<u32>,
+        heap_size: Option<u32>,
+    ) -> Self {
         Self {
             compute_unit_limit,
             direct_priority_fee_lamports: priority_fee,
+            loaded_accounts_data_size_limit,
+            heap_size,
             is_v1: true,
             ..Self::default()
         }
@@ -347,6 +362,8 @@ impl ScanState {
         if self.invalid_compute_budget {
             self.compute_unit_limit = None;
             self.compute_unit_price_micro_lamports = None;
+            self.loaded_accounts_data_size_limit = None;
+            self.heap_size = None;
         }
         let priority_fee_lamports = self.direct_priority_fee_lamports.or_else(|| {
             self.compute_unit_limit.zip(self.compute_unit_price_micro_lamports).map(
@@ -360,6 +377,8 @@ impl ScanState {
             compute_units_consumed,
             compute_unit_limit: self.compute_unit_limit,
             compute_unit_price_micro_lamports: self.compute_unit_price_micro_lamports,
+            loaded_accounts_data_size_limit: self.loaded_accounts_data_size_limit,
+            heap_size: self.heap_size,
             priority_fee_lamports,
             tip_payments_confirmed,
             tip_lamports: self.tip_lamports,
@@ -372,7 +391,7 @@ impl ScanState {
 pub fn parse_rpc_transaction_cost(
     transaction: &EncodedConfirmedTransactionWithStatusMeta,
 ) -> Result<TransactionCost, ParseError> {
-    let (meta, transaction) = convert_rpc_to_grpc(transaction)?;
+    let (meta, transaction) = convert_rpc_to_grpc_for_parsing(transaction)?;
     parse_yellowstone_transaction_cost(&transaction, &meta)
         .ok_or_else(|| ParseError::MissingField("transaction.message".to_string()))
 }
@@ -401,7 +420,14 @@ pub fn parse_yellowstone_transaction_cost(
     let mut state = message
         .config
         .as_ref()
-        .map(|config| ScanState::with_v1_fields(config.compute_unit_limit, config.priority_fee))
+        .map(|config| {
+            ScanState::with_v1_fields(
+                config.compute_unit_limit,
+                config.priority_fee,
+                config.loaded_accounts_data_size_limit,
+                config.heap_size,
+            )
+        })
         .unwrap_or_default();
     for instruction in &message.instructions {
         scan_instruction(
@@ -436,6 +462,8 @@ pub fn parse_shred_transaction_cost(transaction: &VersionedTransaction) -> Trans
         solana_sdk::message::VersionedMessage::V1(message) => ScanState::with_v1_fields(
             message.config.compute_unit_limit,
             message.config.priority_fee,
+            message.config.loaded_accounts_data_size_limit,
+            message.config.heap_size,
         ),
         solana_sdk::message::VersionedMessage::Legacy(_)
         | solana_sdk::message::VersionedMessage::V0(_) => ScanState::default(),
@@ -519,7 +547,20 @@ fn scan_compute_budget(data: &[u8], state: &mut ScanState) {
             };
             state.compute_unit_price_micro_lamports = Some(value);
         }
-        REQUEST_HEAP_FRAME_TAG | SET_LOADED_ACCOUNTS_DATA_SIZE_LIMIT_TAG if data.len() == 5 => {}
+        REQUEST_HEAP_FRAME_TAG => {
+            let Some(value) = read_u32_exact(data) else {
+                state.invalid_compute_budget = true;
+                return;
+            };
+            state.heap_size = Some(value);
+        }
+        SET_LOADED_ACCOUNTS_DATA_SIZE_LIMIT_TAG => {
+            let Some(value) = read_u32_exact(data) else {
+                state.invalid_compute_budget = true;
+                return;
+            };
+            state.loaded_accounts_data_size_limit = Some(value);
+        }
         _ => state.invalid_compute_budget = true,
     }
 }
@@ -612,6 +653,18 @@ mod tests {
         data
     }
 
+    fn heap_size(bytes: u32) -> Vec<u8> {
+        let mut data = vec![REQUEST_HEAP_FRAME_TAG];
+        data.extend_from_slice(&bytes.to_le_bytes());
+        data
+    }
+
+    fn loaded_accounts_data_size_limit(bytes: u32) -> Vec<u8> {
+        let mut data = vec![SET_LOADED_ACCOUNTS_DATA_SIZE_LIMIT_TAG];
+        data.extend_from_slice(&bytes.to_le_bytes());
+        data
+    }
+
     fn transfer(lamports: u64) -> Vec<u8> {
         let mut data = SYSTEM_TRANSFER_TAG.to_vec();
         data.extend_from_slice(&lamports.to_le_bytes());
@@ -638,7 +691,9 @@ mod tests {
                 },
                 config: v1::TransactionConfig::empty()
                     .with_compute_unit_limit(234_567)
-                    .with_priority_fee(4_321),
+                    .with_priority_fee(4_321)
+                    .with_loaded_accounts_data_size_limit(1_048_576)
+                    .with_heap_size(65_536),
                 lifetime_specifier: Hash::new_unique(),
                 account_keys: vec![
                     source,
@@ -667,6 +722,8 @@ mod tests {
                 instructions: vec![
                     grpc_instruction(1, vec![], compute_limit(300_000)),
                     grpc_instruction(1, vec![], compute_price(12_345)),
+                    grpc_instruction(1, vec![], loaded_accounts_data_size_limit(2_097_152)),
+                    grpc_instruction(1, vec![], heap_size(131_072)),
                     grpc_instruction(2, vec![0, 3], transfer(99_999)),
                     grpc_instruction(2, vec![0, 4], transfer(137_273)),
                 ],
@@ -687,6 +744,8 @@ mod tests {
         assert_eq!(cost.compute_units_consumed, Some(135_026));
         assert_eq!(cost.compute_unit_limit, Some(300_000));
         assert_eq!(cost.compute_unit_price_micro_lamports, Some(12_345));
+        assert_eq!(cost.loaded_accounts_data_size_limit, Some(2_097_152));
+        assert_eq!(cost.heap_size, Some(131_072));
         assert_eq!(cost.priority_fee_lamports, Some(3_704));
         assert!(cost.tip_payments_confirmed);
         assert_eq!(cost.tip_lamports, 137_273);
@@ -743,6 +802,8 @@ mod tests {
 
         assert_eq!(cost.compute_unit_limit, None);
         assert_eq!(cost.compute_unit_price_micro_lamports, None);
+        assert_eq!(cost.loaded_accounts_data_size_limit, None);
+        assert_eq!(cost.heap_size, None);
         assert_eq!(cost.priority_fee_lamports, None);
         assert_eq!(cost.tip_lamports, 0);
     }
@@ -876,6 +937,8 @@ mod tests {
         let cost = parse_shred_transaction_cost(&decoded);
         assert_eq!(cost.compute_unit_limit, Some(234_567));
         assert_eq!(cost.compute_unit_price_micro_lamports, None);
+        assert_eq!(cost.loaded_accounts_data_size_limit, Some(1_048_576));
+        assert_eq!(cost.heap_size, Some(65_536));
         assert_eq!(cost.priority_fee_lamports, Some(4_321));
         assert_eq!(cost.tip_lamports, 42);
     }
@@ -893,8 +956,8 @@ mod tests {
                 config: Some(yellowstone_grpc_proto::prelude::TransactionConfig {
                     priority_fee: Some(4_321),
                     compute_unit_limit: Some(234_567),
-                    loaded_accounts_data_size_limit: None,
-                    heap_size: None,
+                    loaded_accounts_data_size_limit: Some(1_048_576),
+                    heap_size: Some(65_536),
                 }),
                 ..Default::default()
             }),
@@ -906,7 +969,51 @@ mod tests {
 
         assert_eq!(cost.compute_unit_limit, Some(234_567));
         assert_eq!(cost.compute_unit_price_micro_lamports, None);
+        assert_eq!(cost.loaded_accounts_data_size_limit, Some(1_048_576));
+        assert_eq!(cost.heap_size, Some(65_536));
         assert_eq!(cost.priority_fee_lamports, Some(4_321));
+    }
+
+    #[test]
+    fn yellowstone_v1_unset_config_fields_remain_distinguishable() {
+        let transaction = Transaction {
+            signatures: vec![],
+            message: Some(Message {
+                versioned: true,
+                config: Some(yellowstone_grpc_proto::prelude::TransactionConfig::default()),
+                ..Default::default()
+            }),
+        };
+
+        let cost =
+            parse_yellowstone_transaction_cost(&transaction, &TransactionStatusMeta::default())
+                .expect("transaction cost");
+
+        assert_eq!(cost.compute_unit_limit, None);
+        assert_eq!(cost.compute_unit_price_micro_lamports, None);
+        assert_eq!(cost.loaded_accounts_data_size_limit, None);
+        assert_eq!(cost.heap_size, None);
+        assert_eq!(cost.priority_fee_lamports, None);
+    }
+
+    #[test]
+    fn transaction_cost_deserializes_json_from_before_v1_resource_fields() {
+        let json = r#"{
+            "transaction_fee_lamports": 5000,
+            "total_fee_and_tip_lamports": 5000,
+            "compute_units_consumed": 123456,
+            "compute_unit_limit": 200000,
+            "compute_unit_price_micro_lamports": 5000,
+            "priority_fee_lamports": 1000,
+            "tip_payments_confirmed": true,
+            "tip_lamports": 0,
+            "tip_payments": []
+        }"#;
+
+        let cost: TransactionCost =
+            serde_json::from_str(json).expect("legacy TransactionCost JSON");
+        assert_eq!(cost.loaded_accounts_data_size_limit, None);
+        assert_eq!(cost.heap_size, None);
     }
 
     #[test]
@@ -946,6 +1053,8 @@ mod tests {
         assert_eq!(cost.compute_units_consumed, Some(123_456));
         assert_eq!(cost.compute_unit_limit, Some(234_567));
         assert_eq!(cost.compute_unit_price_micro_lamports, None);
+        assert_eq!(cost.loaded_accounts_data_size_limit, Some(1_048_576));
+        assert_eq!(cost.heap_size, Some(65_536));
         assert_eq!(cost.priority_fee_lamports, Some(4_321));
         assert_eq!(cost.tip_lamports, 42);
         assert_eq!(cost.total_fee_and_tip_lamports, Some(9_363));
@@ -985,7 +1094,8 @@ mod tests {
             transaction_index: None,
         };
 
-        let (meta, _) = convert_rpc_to_grpc(&transaction).expect("convert failed RPC meta");
+        let (meta, _) =
+            crate::rpc_parser::convert_rpc_to_grpc(&transaction).expect("convert failed RPC meta");
         let decoded_error: solana_sdk::transaction::TransactionError =
             wincode::deserialize(&meta.err.expect("failed status").err)
                 .expect("deserialize transaction error");

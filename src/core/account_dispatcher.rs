@@ -7,6 +7,7 @@
 
 use crate::core::account_fillers::{self, AccountGetter};
 use crate::core::events::*;
+use crate::core::invoke_context::{InvokeContext, InvokeLookup};
 use crate::instr::utils::get_instruction_account_getter;
 use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
@@ -119,7 +120,7 @@ fn find_pumpfun_create_invoke<'a>(
 /// 通用填充辅助宏
 macro_rules! fill_event_accounts {
     ($event:expr, $meta:expr, $tx:expr, $invokes:expr, $program_id:expr, $filler:expr) => {
-        if let Some(invokes) = $invokes.get($program_id) {
+        if let Some(invokes) = $invokes.get_invokes($program_id) {
             if let Some(invoke) = find_instruction_invoke(invokes, $meta, $tx) {
                 let account_keys =
                     $tx.as_ref().and_then(|tx| tx.message.as_ref()).map(|msg| &msg.account_keys);
@@ -143,7 +144,7 @@ macro_rules! fill_event_accounts {
 /// transactions (token-to-token routes) enrich each event from its own leg.
 macro_rules! fill_event_accounts_anchored {
     ($event:expr, $meta:expr, $tx:expr, $invokes:expr, $program_id:expr, $anchor:expr, $filler:expr) => {
-        if let Some(invokes) = $invokes.get($program_id) {
+        if let Some(invokes) = $invokes.get_invokes($program_id) {
             let account_keys =
                 $tx.as_ref().and_then(|tx| tx.message.as_ref()).map(|msg| &msg.account_keys);
             if let Some(invoke) =
@@ -167,7 +168,7 @@ macro_rules! fill_event_accounts_anchored {
 /// Pool-anchored account filling for protocols whose pool is not account zero.
 macro_rules! fill_event_accounts_anchored_at {
     ($event:expr, $meta:expr, $tx:expr, $invokes:expr, $program_id:expr, $anchor_index:expr, $anchor:expr, $filler:expr) => {
-        if let Some(invokes) = $invokes.get($program_id) {
+        if let Some(invokes) = $invokes.get_invokes($program_id) {
             let account_keys =
                 $tx.as_ref().and_then(|tx| tx.message.as_ref()).map(|msg| &msg.account_keys);
             if let Some(invoke) = find_instruction_invoke_anchored(
@@ -215,11 +216,11 @@ macro_rules! fill_event_accounts_with_invoke {
 // ============================================================================
 
 /// 从交易 meta 将缺失账户填入事件（`program_invokes`: program id → (outer, inner) 索引列表）
-pub fn fill_accounts_with_owned_keys(
+fn fill_accounts_with_lookup<L: InvokeLookup + ?Sized>(
     event: &mut DexEvent,
     meta: &TransactionStatusMeta,
     transaction: &Option<Transaction>,
-    program_invokes: &HashMap<Pubkey, Vec<(i32, i32)>>,
+    program_invokes: &L,
 ) {
     use crate::grpc::program_ids::*;
 
@@ -241,7 +242,7 @@ pub fn fill_accounts_with_owned_keys(
             );
         }
         DexEvent::PumpFunCreate(e) => {
-            if let Some(invokes) = program_invokes.get(&PUMPFUN_PROGRAM) {
+            if let Some(invokes) = program_invokes.get_invokes(&PUMPFUN_PROGRAM) {
                 if let Some(invoke) = find_pumpfun_create_invoke(invokes, transaction, &e.ix_name) {
                     fill_event_accounts_with_invoke!(
                         e,
@@ -748,6 +749,26 @@ pub fn fill_accounts_with_owned_keys(
 
         _ => {}
     }
+}
+
+/// 从交易 meta 将缺失账户填入事件（`program_invokes`: program id → (outer, inner) 索引列表）
+pub fn fill_accounts_with_owned_keys(
+    event: &mut DexEvent,
+    meta: &TransactionStatusMeta,
+    transaction: &Option<Transaction>,
+    program_invokes: &HashMap<Pubkey, Vec<(i32, i32)>>,
+) {
+    fill_accounts_with_lookup(event, meta, transaction, program_invokes);
+}
+
+#[inline]
+pub(crate) fn fill_accounts_with_invoke_context(
+    event: &mut DexEvent,
+    meta: &TransactionStatusMeta,
+    transaction: &Option<Transaction>,
+    program_invokes: &InvokeContext,
+) {
+    fill_accounts_with_lookup(event, meta, transaction, program_invokes);
 }
 
 #[cfg(test)]

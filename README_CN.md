@@ -113,16 +113,27 @@ sol-parser-sdk = { path = "../sol-parser-sdk", default-features = false, feature
 
 ```toml
 # 在 Cargo.toml 中添加
-sol-parser-sdk = "0.7.1"
+sol-parser-sdk = "0.7.2"
 ```
 
 或使用零拷贝解析器（最高性能）：
 
 ```toml
-sol-parser-sdk = { version = "0.7.1", default-features = false, features = ["parse-zero-copy"] }
+sol-parser-sdk = { version = "0.7.2", default-features = false, features = ["parse-zero-copy"] }
 ```
 
 ### 发布说明
+
+#### v0.7.2
+
+- 将 vendored Meteora DAMM v2 IDL 同步到 **0.2.4**，DBC IDL 同步到 **0.2.1**。
+- 新增 DAMM v2 Position Delegate 与 config 事件解析：`EvtUpdateDelegatePermission`、`EvtWithdrawDeadLiquidityReward`、`EvtCreateConfig`、`EvtCreateDynamicConfig`（含 0.2.4 的 `permission` 字段）。
+- 打通日志、优化匹配器、inner instruction 路径，以及 `EventType` / `DexEvent` 过滤。
+- 通过 `Message.config` 识别 Yellowstone V1 消息，并完整输出 priority fee、compute-unit limit、loaded-accounts data-size limit、heap size 四项交易配置；按 Solana 规范忽略 V1 中的 ComputeBudget 指令。
+- Yellowstone V1 接入要求 `yellowstone-grpc-proto >= 12.6.0`，且服务端 Yellowstone geyser plugin 必须 `>= 15.1.1`；更旧的服务端会在传输前把 V1 静默降级成 V0 并丢弃 `Message.config`。
+- 使用纯安全、可移植的 `base58-turbo` 路径加速 RPC inner instruction 的 Base58 解码；在保存的主网 corpus 上，端到端 RPC 解析延迟按指令载荷大小降低 17.7% 至 80% 以上。
+- 在 RPC 解析链路中借用日志与余额 metadata，避免重复克隆；最终跨协议 corpus 中 PumpFun、PumpSwap、Raydium CPMM、Meteora/Orca 交易解析耗时为 7.40-11.80 us。
+- 新增 PumpFun、PumpSwap、Raydium CPMM、Meteora DLMM/Orca 离线 RPC fixture、精确事件回归测试及统一跨协议 benchmark。
 
 #### v0.7.1
 
@@ -140,8 +151,8 @@ sol-parser-sdk = { version = "0.7.1", default-features = false, features = ["par
 
 #### v0.6.6
 
-- 为 PumpFun 交易事件增加 `pre_token_balance` 和 `post_token_balance`，单位为 mint 原始精度。
-- 增加以 lamports 为单位的 `pre_sol_balance` 和 `post_sol_balance`，直接从交易 metadata 填充，无需额外 RPC 请求。
+- 为 PumpFun 交易事件增加交易完成后的 `token_balance`，单位为 mint 原始精度。
+- 增加交易完成后以 lamports 为单位的 `sol_balance`，直接从交易 metadata 填充，无需额外 RPC 请求。
 - 在捕获的 Yellowstone 基准 fixture 上，将 PumpFun 端到端解析延迟从 6.7349 us 降至 4.4293 us，降低 34.23%。
 - 增加可复现的 Criterion 基准、Yellowstone 原始交易 fixture 和实时余额 delta 校验。
 

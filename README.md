@@ -113,16 +113,27 @@ sol-parser-sdk = { path = "../sol-parser-sdk", default-features = false, feature
 
 ```toml
 # Add to your Cargo.toml
-sol-parser-sdk = "0.7.1"
+sol-parser-sdk = "0.7.2"
 ```
 
 Or with the zero-copy parser (maximum performance):
 
 ```toml
-sol-parser-sdk = { version = "0.7.1", default-features = false, features = ["parse-zero-copy"] }
+sol-parser-sdk = { version = "0.7.2", default-features = false, features = ["parse-zero-copy"] }
 ```
 
 ### Release Notes
+
+#### v0.7.2
+
+- Syncs vendored Meteora DAMM v2 IDL to **0.2.4** and DBC IDL to **0.2.1**.
+- Adds parsers for DAMM v2 Position Delegate and config events: `EvtUpdateDelegatePermission`, `EvtWithdrawDeadLiquidityReward`, `EvtCreateConfig`, and `EvtCreateDynamicConfig` (including the 0.2.4 `permission` field).
+- Wires the new events through log, optimized matcher, and inner-instruction paths, plus `EventType` / `DexEvent` filters.
+- Identifies Yellowstone V1 messages through `Message.config` and exposes all four transaction-config requests: priority fee, compute-unit limit, loaded-accounts data-size limit, and heap size. V1 ComputeBudget instructions remain ignored as required by Solana.
+- Yellowstone V1 ingestion requires `yellowstone-grpc-proto >= 12.6.0` and a server running Yellowstone geyser plugin `>= 15.1.1`; older server plugins silently downgrade V1 to V0 and discard `Message.config` before transmission.
+- Accelerates RPC inner-instruction Base58 decoding through the portable safe `base58-turbo` path. The saved mainnet corpus reduces end-to-end RPC parse latency by 17.7% to more than 80%, depending on instruction payload size.
+- Borrows RPC log and balance metadata through the parse path to avoid redundant cloning. The final cross-protocol corpus parses PumpFun, PumpSwap, Raydium CPMM, and Meteora/Orca transactions in 7.40-11.80 us.
+- Adds offline PumpFun, PumpSwap, Raydium CPMM, and Meteora DLMM/Orca RPC fixtures with exact event regression tests and a shared cross-protocol benchmark.
 
 #### v0.7.1
 
@@ -140,8 +151,8 @@ sol-parser-sdk = { version = "0.7.1", default-features = false, features = ["par
 
 #### v0.6.6
 
-- Adds `pre_token_balance` and `post_token_balance` to PumpFun trade events in raw mint units.
-- Adds `pre_sol_balance` and `post_sol_balance` in lamports, filled directly from transaction metadata without extra RPC calls.
+- Adds the post-transaction `token_balance` to PumpFun trade events in raw mint units.
+- Adds the post-transaction `sol_balance` in lamports, filled directly from transaction metadata without extra RPC calls.
 - Reduces end-to-end PumpFun Yellowstone parsing latency by 34.23% on the captured benchmark fixture, from 6.7349 us to 4.4293 us.
 - Adds reproducible Criterion benchmarks, a captured Yellowstone transaction fixture, and live balance-delta validation.
 

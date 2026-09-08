@@ -482,6 +482,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4c7f02d4ea65f2c1853089ffd8d2787bdbc63de2f0d29dedbcf8ccdfa0ccd4cf"
 
 [[package]]
+name = "base58-turbo"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "48e9e8a40264cfedd26218e801f1194e9af3a6d2631f0171d753ba184f1bba35"
+
+[[package]]
 name = "base64"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3718,9 +3724,10 @@ dependencies = [
 
 [[package]]
 name = "sol-parser-sdk"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "anyhow",
+ "base58-turbo",
  "base64 0.22.1",
  "base64-simd",
  "borsh",
