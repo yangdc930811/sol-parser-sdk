@@ -53,6 +53,16 @@ pub struct YellowstoneGrpc {
     subscription_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     subscription_lifecycle: Arc<Mutex<()>>,
     stop_signal: Arc<Mutex<Option<Arc<AtomicBool>>>>,
+    /// 最新订阅过滤器缓存：update_subscription 时同步更新，断线重连时用最新过滤器重建订阅
+    latest_filters: Arc<Mutex<Option<CachedFilters>>>,
+}
+
+/// 订阅过滤器快照（供断线重连使用）
+#[derive(Clone, Default)]
+struct CachedFilters {
+    transaction_filters: Vec<TransactionFilter>,
+    account_filters: Vec<AccountFilter>,
+    event_type_filter: Option<EventTypeFilter>,
 }
 
 impl YellowstoneGrpc {
@@ -69,6 +79,7 @@ impl YellowstoneGrpc {
             subscription_handle: Arc::new(Mutex::new(None)),
             subscription_lifecycle: Arc::new(Mutex::new(())),
             stop_signal: Arc::new(Mutex::new(None)),
+            latest_filters: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -86,10 +97,11 @@ impl YellowstoneGrpc {
             subscription_handle: Arc::new(Mutex::new(None)),
             subscription_lifecycle: Arc::new(Mutex::new(())),
             stop_signal: Arc::new(Mutex::new(None)),
+            latest_filters: Arc::new(Mutex::new(None)),
         })
     }
 
-    /// 订阅 DEX 事件（自动重连）
+    /// 订阅 DEX 事件（自动重连，重连时使用最新过滤器缓存）
     pub async fn subscribe_dex_events(
         &self,
         transaction_filters: Vec<TransactionFilter>,
@@ -98,6 +110,13 @@ impl YellowstoneGrpc {
     ) -> Result<Arc<ArrayQueue<DexEvent>>, Box<dyn std::error::Error>> {
         let _lifecycle = self.subscription_lifecycle.lock().await;
         self.stop_without_lifecycle_lock().await;
+
+        // 缓存初始过滤器，重连循环从中读取
+        *self.latest_filters.lock().await = Some(CachedFilters {
+            transaction_filters,
+            account_filters,
+            event_type_filter,
+        });
 
         let queue = Arc::new(ArrayQueue::new(self.config.buffer_size.max(1)));
         let queue_clone = Arc::clone(&queue);
@@ -112,13 +131,21 @@ impl YellowstoneGrpc {
                     break;
                 }
 
+                // 每次（重）连接前读取最新过滤器缓存，避免动态更新后的过滤器在断线重连时丢失
+                let (tx_filters, acc_filters, evt_filter) = {
+                    let guard = self_clone.latest_filters.lock().await;
+                    match guard.as_ref() {
+                        Some(cf) => (
+                            cf.transaction_filters.clone(),
+                            cf.account_filters.clone(),
+                            cf.event_type_filter.clone(),
+                        ),
+                        None => break,
+                    }
+                };
+
                 match self_clone
-                    .stream_events(
-                        &transaction_filters,
-                        &account_filters,
-                        &event_type_filter,
-                        &queue_clone,
-                    )
+                    .stream_events(&tx_filters, &acc_filters, &evt_filter, &queue_clone)
                     .await
                 {
                     Ok(_) => delay = 1,
@@ -142,12 +169,18 @@ impl YellowstoneGrpc {
         Ok(queue)
     }
 
-    /// 动态更新订阅过滤器
+    /// 动态更新订阅过滤器（同步更新缓存，断线重连时使用最新过滤器）
     pub async fn update_subscription(
         &self,
         transaction_filters: Vec<TransactionFilter>,
         account_filters: Vec<AccountFilter>,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // 先同步缓存，确保重连使用最新过滤器
+        if let Some(cf) = self.latest_filters.lock().await.as_mut() {
+            cf.transaction_filters = transaction_filters.clone();
+            cf.account_filters = account_filters.clone();
+        }
+
         let sender = self.control_tx.lock().await.as_ref().ok_or("No active subscription")?.clone();
 
         let request = build_subscribe_request(&transaction_filters, &account_filters);
@@ -165,6 +198,7 @@ impl YellowstoneGrpc {
             stop_signal.store(true, Ordering::SeqCst);
         }
         self.control_tx.lock().await.take();
+        *self.latest_filters.lock().await = None;
         let handle = self.subscription_handle.lock().await.take();
         if let Some(handle) = handle {
             handle.abort();

@@ -219,8 +219,9 @@ pub struct AccountFilterMemcmp {
     pub bytes: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum Protocol {
+    #[default]
     PumpFun,
     PumpSwap,
     PumpFees,
