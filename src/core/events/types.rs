@@ -18,6 +18,29 @@ pub const PUMPFUN_SOLSCAN_SOL_QUOTE_MINT: Pubkey =
 /// SPL wrapped-SOL mint.
 pub const PUMPFUN_WSOL_QUOTE_MINT: Pubkey = pubkey!("So11111111111111111111111111111111111111112");
 
+/// StonkFun LaunchLab platform config for standard (creator-fee) launches.
+pub const STONKFUN_STANDARD_PLATFORM_CONFIG: Pubkey =
+    pubkey!("4E876qZTE9FJMrBzgVtBrSrzz2TLivB5Y5QXPjB4gZL7");
+
+/// StonkFun LaunchLab platform config for reward (transfer-fee) launches.
+pub const STONKFUN_REWARD_PLATFORM_CONFIG: Pubkey =
+    pubkey!("6BwHHDg3u1854jC8PDLXvR4spTcLNaoBxLJNGC4nTESt");
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StonkFunMode {
+    Standard,
+    Reward,
+}
+
+#[inline]
+pub fn stonkfun_mode_from_platform_config(platform_config: Pubkey) -> Option<StonkFunMode> {
+    match platform_config {
+        STONKFUN_STANDARD_PLATFORM_CONFIG => Some(StonkFunMode::Standard),
+        STONKFUN_REWARD_PLATFORM_CONFIG => Some(StonkFunMode::Reward),
+        _ => None,
+    }
+}
+
 #[inline]
 pub fn normalize_pumpfun_quote_mint(quote_mint: Pubkey) -> Pubkey {
     if quote_mint == Pubkey::default() {
@@ -97,6 +120,23 @@ pub struct RaydiumLaunchlabPoolCreateEvent {
     pub quote_token_program: Pubkey,
 }
 
+impl RaydiumLaunchlabPoolCreateEvent {
+    #[inline]
+    pub fn stonkfun_mode(&self) -> Option<StonkFunMode> {
+        stonkfun_mode_from_platform_config(self.platform_config)
+    }
+
+    #[inline]
+    pub fn is_stonkfun(&self) -> bool {
+        self.stonkfun_mode().is_some()
+    }
+}
+
+/// Preferred generic name for a pool created by the shared LaunchLab program.
+pub type LaunchLabPoolCreateEvent = RaydiumLaunchlabPoolCreateEvent;
+/// Preferred platform name when [`RaydiumLaunchlabPoolCreateEvent::is_stonkfun`] is true.
+pub type StonkFunPoolCreateEvent = RaydiumLaunchlabPoolCreateEvent;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BaseMintParam {
     pub symbol: String,
@@ -107,7 +147,7 @@ pub struct BaseMintParam {
 
 /// RaydiumLaunchlab Trade Event
 #[cfg_attr(feature = "parse-borsh", derive(BorshDeserialize))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RaydiumLaunchlabTradeEvent {
     #[cfg_attr(feature = "parse-borsh", borsh(skip))]
     pub metadata: EventMetadata,
@@ -121,7 +161,43 @@ pub struct RaydiumLaunchlabTradeEvent {
 
     // === 非 Borsh 字段（派生字段）===
     #[cfg_attr(feature = "parse-borsh", borsh(skip))]
+    #[serde(default)]
+    pub total_base_sell: u64,
+    #[cfg_attr(feature = "parse-borsh", borsh(skip))]
+    #[serde(default)]
+    pub virtual_base: u64,
+    #[cfg_attr(feature = "parse-borsh", borsh(skip))]
+    #[serde(default)]
+    pub virtual_quote: u64,
+    #[cfg_attr(feature = "parse-borsh", borsh(skip))]
+    #[serde(default)]
+    pub real_base_before: u64,
+    #[cfg_attr(feature = "parse-borsh", borsh(skip))]
+    #[serde(default)]
+    pub real_quote_before: u64,
+    #[cfg_attr(feature = "parse-borsh", borsh(skip))]
+    #[serde(default)]
+    pub real_base_after: u64,
+    #[cfg_attr(feature = "parse-borsh", borsh(skip))]
+    #[serde(default)]
+    pub real_quote_after: u64,
+    #[cfg_attr(feature = "parse-borsh", borsh(skip))]
+    #[serde(default)]
+    pub protocol_fee: u64,
+    #[cfg_attr(feature = "parse-borsh", borsh(skip))]
+    #[serde(default)]
+    pub platform_fee: u64,
+    #[cfg_attr(feature = "parse-borsh", borsh(skip))]
+    #[serde(default)]
+    pub creator_fee: u64,
+    #[cfg_attr(feature = "parse-borsh", borsh(skip))]
+    #[serde(default)]
+    pub share_fee: u64,
+    #[cfg_attr(feature = "parse-borsh", borsh(skip))]
     pub trade_direction: TradeDirection,
+    #[cfg_attr(feature = "parse-borsh", borsh(skip))]
+    #[serde(default)]
+    pub pool_status: RaydiumLaunchlabPoolStatus,
     #[cfg_attr(feature = "parse-borsh", borsh(skip))]
     pub exact_in: bool,
     #[cfg_attr(feature = "parse-borsh", borsh(skip))]
@@ -154,6 +230,40 @@ pub struct RaydiumLaunchlabTradeEvent {
     #[cfg_attr(feature = "parse-borsh", borsh(skip))]
     #[serde(default)]
     pub quote_token_program: Pubkey,
+    #[cfg_attr(feature = "parse-borsh", borsh(skip))]
+    #[serde(default)]
+    pub system_program: Pubkey,
+    #[cfg_attr(feature = "parse-borsh", borsh(skip))]
+    #[serde(default)]
+    pub platform_associated_account: Pubkey,
+    #[cfg_attr(feature = "parse-borsh", borsh(skip))]
+    #[serde(default)]
+    pub creator_associated_account: Pubkey,
+}
+
+impl RaydiumLaunchlabTradeEvent {
+    #[inline]
+    pub fn stonkfun_mode(&self) -> Option<StonkFunMode> {
+        stonkfun_mode_from_platform_config(self.platform_config)
+    }
+
+    #[inline]
+    pub fn is_stonkfun(&self) -> bool {
+        self.stonkfun_mode().is_some()
+    }
+}
+
+/// Preferred generic name for a trade emitted by the shared LaunchLab program.
+pub type LaunchLabTradeEvent = RaydiumLaunchlabTradeEvent;
+/// Preferred platform name when [`RaydiumLaunchlabTradeEvent::is_stonkfun`] is true.
+pub type StonkFunTradeEvent = RaydiumLaunchlabTradeEvent;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum RaydiumLaunchlabPoolStatus {
+    #[default]
+    Fund,
+    Migrate,
+    Trade,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -223,6 +333,12 @@ pub struct PumpFunTradeEvent {
     pub quote_amount: u64,
     pub virtual_quote_reserves: u64,
     pub real_quote_reserves: u64,
+    /// Holder rewards fee rate. Zero for regular coins and legacy events.
+    #[serde(default)]
+    pub holder_rewards_bps: u64,
+    /// Holder rewards amount. Zero for regular coins and legacy events.
+    #[serde(default)]
+    pub holder_rewards: u64,
     /// 是否返现代币（由 cashback_fee_basis_points > 0 推导，供 sol-trade-sdk 等构造 sell 指令用）
     #[borsh(skip)]
     pub is_cashback_coin: bool,
@@ -524,6 +640,12 @@ pub struct PumpFunCreateTokenEvent {
     /// Initial virtual quote reserves. For SOL pools this is the SOL-side reserve;
     /// for USDC pools this is the USDC-side reserve.
     pub virtual_quote_reserves: u64,
+    /// Coin-specific creator fee rate. Zero means the standard fee schedule.
+    #[serde(default)]
+    pub creator_fee_bps: u64,
+    /// Whether creator fees are distributed to holders.
+    #[serde(default)]
+    pub is_holder_reward: bool,
     /// Original PumpFun instruction name: `"create"` or `"create_v2"`.
     #[borsh(skip)]
     pub ix_name: String,
@@ -585,6 +707,10 @@ pub struct PumpFunCreateV2TokenEvent {
     pub quote_token_program: Pubkey,
     #[borsh(skip)]
     pub virtual_quote_reserves: u64,
+    #[serde(default)]
+    pub creator_fee_bps: u64,
+    #[serde(default)]
+    pub is_holder_reward: bool,
     /// Original PumpFun instruction name: `"create"` or `"create_v2"`.
     #[borsh(skip)]
     pub ix_name: String,
@@ -699,6 +825,10 @@ pub struct PumpSwapBuyEvent {
     pub can_boost: bool,
     #[serde(default)]
     pub base_supply: u64,
+    #[serde(default)]
+    pub holder_rewards_bps: u64,
+    #[serde(default)]
+    pub holder_rewards: u64,
 
     // === 额外的信息 ===
     #[borsh(skip)]
@@ -772,6 +902,10 @@ pub struct PumpSwapSellEvent {
     pub can_boost: bool,
     #[serde(default)]
     pub base_supply: u64,
+    #[serde(default)]
+    pub holder_rewards_bps: u64,
+    #[serde(default)]
+    pub holder_rewards: u64,
 
     // === 额外的信息 ===
     #[borsh(skip)]
@@ -832,6 +966,15 @@ pub struct PumpSwapCreatePoolEvent {
     /// not carry this value, so log-only parses keep the default `false`.
     #[serde(default)]
     pub is_cashback_coin: bool,
+    /// Coin-specific creator fee rate carried over from the bonding curve.
+    #[serde(default)]
+    pub creator_fee_bps: u64,
+    /// Reserved by the program; currently always false.
+    #[serde(default)]
+    pub can_edit_creator_fee: bool,
+    /// Whether creator fees are distributed to holders.
+    #[serde(default)]
+    pub is_holder_reward: bool,
 }
 
 /// PumpSwap Pool Created Event - 指令解析版本
@@ -1564,14 +1707,14 @@ pub struct RaydiumAmmV4WithdrawPnlEvent {
 
 // ====================== Account Events ======================
 
-/// RaydiumLaunchlab (Raydium LaunchLab) AmmCreatorFeeOn enum
+/// RaydiumLaunchlab (LaunchLab) AmmCreatorFeeOn enum
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AmmCreatorFeeOn {
     QuoteToken = 0,
     BothToken = 1,
 }
 
-/// RaydiumLaunchlab (Raydium LaunchLab) VestingSchedule
+/// RaydiumLaunchlab (LaunchLab) VestingSchedule
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VestingSchedule {
     pub total_locked_amount: u64,
@@ -1643,7 +1786,7 @@ pub struct RaydiumLaunchlabPlatformConfigAccountEvent {
     pub platform_config: RaydiumLaunchlabPlatformConfig,
 }
 
-/// RaydiumLaunchlab (Raydium LaunchLab) BondingCurveParam
+/// RaydiumLaunchlab (LaunchLab) BondingCurveParam
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BondingCurveParam {
     pub migrate_type: u8,
@@ -1656,7 +1799,7 @@ pub struct BondingCurveParam {
     pub unlock_period: u64,
 }
 
-/// RaydiumLaunchlab (Raydium LaunchLab) PlatformCurveParam
+/// RaydiumLaunchlab (LaunchLab) PlatformCurveParam
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlatformCurveParam {
     pub epoch: u64,
@@ -1749,6 +1892,12 @@ pub struct PumpSwapPool {
     /// Added by the PumpSwap boost upgrade. Legacy pools decode this as zero.
     #[serde(default)]
     pub virtual_quote_reserves: i128,
+    #[serde(default)]
+    pub creator_fee_bps: u64,
+    #[serde(default)]
+    pub can_edit_creator_fee: bool,
+    #[serde(default)]
+    pub is_holder_reward: bool,
 }
 
 /// PumpFun Bonding Curve Account Event
@@ -1771,6 +1920,12 @@ pub struct PumpFunBondingCurve {
     pub is_mayhem_mode: bool,
     pub is_cashback_coin: bool,
     pub quote_mint: Pubkey,
+    #[serde(default)]
+    pub creator_fee_bps: u64,
+    #[serde(default)]
+    pub can_edit_creator_fee: bool,
+    #[serde(default)]
+    pub is_holder_reward: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -225,6 +225,11 @@ pub enum Protocol {
     PumpFun,
     PumpSwap,
     PumpFees,
+    /// All traffic from the shared LaunchLab program.
+    LaunchLab,
+    /// LaunchLab traffic attributed to StonkFun after parsing `platform_config`.
+    StonkFun,
+    /// Backward-compatible alias for [`Protocol::LaunchLab`].
     RaydiumLaunchlab,
     RaydiumCpmm,
     RaydiumClmm,
@@ -560,7 +565,7 @@ impl EventTypeFilter {
         ])
     }
 
-    /// Check if Raydium LaunchLab events are included in the filter.
+    /// Check if LaunchLab events are included in the filter.
     #[inline]
     pub fn includes_raydium_launchlab(&self) -> bool {
         self.includes_any(&[
