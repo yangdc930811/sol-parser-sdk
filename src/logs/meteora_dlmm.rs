@@ -4,7 +4,7 @@
 
 use super::utils::*;
 use crate::core::events::*;
-use solana_sdk::signature::Signature;
+use solana_sdk::{pubkey::Pubkey, signature::Signature};
 
 /// Meteora DLMM 事件 discriminator 常量
 pub mod discriminators {
@@ -118,6 +118,18 @@ fn parse_structured_log(
         discriminators::LEGACY_CLOSE_POSITION_EVENT => {
             parse_close_position_event(data, signature, slot, tx_index, block_time_us, grpc_recv_us)
         }
+        [27, 143, 244, 33, 80, 43, 110, 146] => {
+            let pool = read_pubkey(data, 0)?;
+            let metadata = create_metadata_simple(
+                signature,
+                slot,
+                tx_index,
+                block_time_us,
+                pool,
+                grpc_recv_us,
+            );
+            parse_claim_reward2_from_data(data, metadata)
+        }
         discriminators::CLAIM_FEE_EVENT | discriminators::LEGACY_CLAIM_FEE_EVENT => {
             parse_claim_fee_event(data, signature, slot, tx_index, block_time_us, grpc_recv_us)
         }
@@ -186,12 +198,21 @@ pub fn parse_swap_from_data(data: &[u8], metadata: EventMetadata) -> Option<DexE
         protocol_fee,
         fee_bps,
         host_fee,
+        reserve_x: Pubkey::default(),
+        reserve_y: Pubkey::default(),
+        oracle: Pubkey::default(),
+        bitmap_extension: None,
+        token_x_program: Pubkey::default(),
+        token_y_program: Pubkey::default(),
+        bin_arrays: Vec::new(),
+
+        ..Default::default()
     }))
 }
 
 #[inline(always)]
 pub fn parse_swap2_from_data(data: &[u8], metadata: EventMetadata) -> Option<DexEvent> {
-    if data.len() < 147 {
+    if data.len() < 147 || data[72] > 1 || data[145] > 1 || data[146] > 1 {
         return None;
     }
     let mut offset = 0;
@@ -217,25 +238,32 @@ pub fn parse_swap2_from_data(data: &[u8], metadata: EventMetadata) -> Option<Dex
     let amount_in = read_u64_le(data, offset)?;
     offset += 8;
 
-    let _amount_left = read_u64_le(data, offset)?;
+    let amount_left = read_u64_le(data, offset)?;
     offset += 8;
 
     let amount_out = read_u64_le(data, offset)?;
     offset += 8;
 
-    let fee = read_u64_le(data, offset)?;
+    let mm_fee = read_u64_le(data, offset)?;
     offset += 8;
 
     let protocol_fee = read_u64_le(data, offset)?;
     offset += 8;
 
-    let _limit_order_fee = read_u64_le(data, offset)?;
+    let limit_order_fee = read_u64_le(data, offset)?;
     offset += 8;
 
     let host_fee = read_u64_le(data, offset)?;
+    let fee = mm_fee.checked_add(protocol_fee)?.checked_add(limit_order_fee)?;
 
     Some(DexEvent::MeteoraDlmmSwap(MeteoraDlmmSwapEvent {
         metadata,
+        event_version: 2,
+        amount_left,
+        mm_fee,
+        limit_order_fee,
+        fees_on_input: data[145] != 0,
+        fees_on_token_x: data[146] != 0,
         token_x_mint: solana_sdk::pubkey::Pubkey::default(),
         token_y_mint: solana_sdk::pubkey::Pubkey::default(),
         user_token_in: solana_sdk::pubkey::Pubkey::default(),
@@ -252,6 +280,15 @@ pub fn parse_swap2_from_data(data: &[u8], metadata: EventMetadata) -> Option<Dex
         protocol_fee,
         fee_bps,
         host_fee,
+        reserve_x: Pubkey::default(),
+        reserve_y: Pubkey::default(),
+        oracle: Pubkey::default(),
+        bitmap_extension: None,
+        token_x_program: Pubkey::default(),
+        token_y_program: Pubkey::default(),
+        bin_arrays: Vec::new(),
+
+        ..Default::default()
     }))
 }
 
@@ -569,6 +606,15 @@ fn parse_swap_event(
         protocol_fee,
         fee_bps,
         host_fee,
+        reserve_x: Pubkey::default(),
+        reserve_y: Pubkey::default(),
+        oracle: Pubkey::default(),
+        bitmap_extension: None,
+        token_x_program: Pubkey::default(),
+        token_y_program: Pubkey::default(),
+        bin_arrays: Vec::new(),
+
+        ..Default::default()
     }))
 }
 
@@ -1008,6 +1054,7 @@ fn parse_swap_from_text(
         protocol_fee: 0,
         fee_bps: 0,
         host_fee: 0,
+        ..Default::default()
     }))
 }
 
@@ -1103,5 +1150,54 @@ fn parse_initialize_pool_from_text(
         creator: solana_sdk::pubkey::Pubkey::default(),
         active_bin_id: extract_number_from_text(log, "bin_id").unwrap_or(0) as i32,
         bin_step: extract_number_from_text(log, "bin_step").unwrap_or(1) as u16,
+    }))
+}
+
+#[cfg(test)]
+mod current_component_tests {
+    use super::*;
+    #[test]
+    fn current_fee_components_and_bounds() {
+        let mut b = vec![0u8; 147];
+        b[97..105].copy_from_slice(&9007199254740993u64.to_le_bytes());
+        b[113..121].copy_from_slice(&17531u64.to_le_bytes());
+        b[121..129].copy_from_slice(&1947u64.to_le_bytes());
+        b[145] = 1;
+        let DexEvent::MeteoraDlmmSwap(e) =
+            parse_swap2_from_data(&b, EventMetadata::default()).unwrap()
+        else {
+            panic!("variant")
+        };
+        assert_eq!(e.fee, 19478);
+        assert_eq!(e.mm_fee, 17531);
+        assert_eq!(e.amount_left, 9007199254740993);
+        assert!(e.fees_on_input);
+        assert!(!e.fees_on_token_x);
+        for n in 0..147 {
+            assert!(parse_swap2_from_data(&b[..n], EventMetadata::default()).is_none());
+        }
+        b[113..121].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(parse_swap2_from_data(&b, EventMetadata::default()).is_none());
+        b[113..121].copy_from_slice(&3u64.to_le_bytes());
+        b[146] = 2;
+        assert!(parse_swap2_from_data(&b, EventMetadata::default()).is_none());
+    }
+}
+
+pub(crate) fn parse_claim_reward2_from_data(
+    data: &[u8],
+    metadata: EventMetadata,
+) -> Option<DexEvent> {
+    if data.len() < 116 {
+        return None;
+    }
+    Some(DexEvent::MeteoraDlmmClaimReward(MeteoraDlmmClaimRewardEvent {
+        metadata,
+        pool: read_pubkey(data, 0)?,
+        position: read_pubkey(data, 32)?,
+        owner: read_pubkey(data, 64)?,
+        reward_index: read_u64_le(data, 96)?,
+        total_reward: read_u64_le(data, 104)?,
+        active_bin_id: i32::from_le_bytes(data[112..116].try_into().ok()?),
     }))
 }

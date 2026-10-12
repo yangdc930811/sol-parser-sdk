@@ -46,6 +46,9 @@ fn supports_pumpfun_instruction(disc: [u8; 8]) -> bool {
     matches!(
         disc,
         pump::discriminators::CREATE
+            | pump::discriminators::BUY_V3
+            | pump::discriminators::BUY_EXACT_QUOTE_IN_V3
+            | pump::discriminators::SELL_V3
             | pump::discriminators::CREATE_V2
             | pump::discriminators::BUY
             | pump::discriminators::SELL
@@ -53,6 +56,7 @@ fn supports_pumpfun_instruction(disc: [u8; 8]) -> bool {
             | pump::discriminators::BUY_V2
             | pump::discriminators::BUY_EXACT_QUOTE_IN_V2
             | pump::discriminators::SELL_V2
+            | pump::discriminators::MIGRATE_BONDING_CURVE_CREATOR
     )
 }
 
@@ -61,6 +65,9 @@ fn supports_pumpswap_instruction(disc: [u8; 8]) -> bool {
     matches!(
         disc,
         pump_amm::discriminators::BUY
+            | pump_amm::discriminators::BUY_V2
+            | pump_amm::discriminators::BUY_EXACT_QUOTE_IN_V2
+            | pump_amm::discriminators::SELL_V2
             | pump_amm::discriminators::SELL
             | pump_amm::discriminators::CREATE_POOL
             | pump_amm::discriminators::BUY_EXACT_QUOTE_IN
@@ -98,6 +105,8 @@ fn supports_launchlab_instruction(disc: [u8; 8]) -> bool {
             | raydium_launchlab::discriminators::INITIALIZE
             | raydium_launchlab::discriminators::INITIALIZE_V2
             | raydium_launchlab::discriminators::INITIALIZE_WITH_TOKEN_2022
+            | raydium_launchlab::discriminators::MIGRATE_TO_AMM
+            | raydium_launchlab::discriminators::MIGRATE_TO_CPSWAP
     )
 }
 
@@ -108,8 +117,11 @@ fn supports_cpmm_instruction(disc: [u8; 8]) -> bool {
         raydium_cpmm::discriminators::SWAP_BASE_IN
             | raydium_cpmm::discriminators::SWAP_BASE_OUT
             | raydium_cpmm::discriminators::INITIALIZE
+            | raydium_cpmm::discriminators::INITIALIZE_PERMISSION
             | raydium_cpmm::discriminators::DEPOSIT
             | raydium_cpmm::discriminators::WITHDRAW
+            | raydium_cpmm::discriminators::COLLECT_CREATOR_FEE
+            | raydium_cpmm::discriminators::COLLECT_CREATOR_FEE_PERMISSIONLESS
     )
 }
 
@@ -140,6 +152,8 @@ fn supports_raydium_amm_v4_instruction(instruction_data: &[u8]) -> bool {
             | Some(raydium_amm::discriminators::WITHDRAW)
             | Some(raydium_amm::discriminators::INITIALIZE2)
             | Some(raydium_amm::discriminators::WITHDRAW_PNL)
+            | Some(raydium_amm::discriminators::SWAP_BASE_IN_V2)
+            | Some(raydium_amm::discriminators::SWAP_BASE_OUT_V2)
     )
 }
 
@@ -152,6 +166,9 @@ fn supports_orca_instruction(disc: [u8; 8]) -> bool {
             | orca_whirlpool::discriminators::INCREASE_LIQUIDITY
             | orca_whirlpool::discriminators::DECREASE_LIQUIDITY
             | orca_whirlpool::discriminators::INITIALIZE_POOL
+            | orca_whirlpool::discriminators::INITIALIZE_POOL_V2
+            | orca_whirlpool::discriminators::INCREASE_LIQUIDITY_V2
+            | orca_whirlpool::discriminators::DECREASE_LIQUIDITY_V2
     )
 }
 
@@ -161,8 +178,17 @@ fn supports_meteora_pools_instruction(disc: [u8; 8]) -> bool {
         disc,
         meteora_amm::discriminators::SWAP
             | meteora_amm::discriminators::ADD_LIQUIDITY
+            | meteora_amm::discriminators::ADD_IMBALANCE_LIQUIDITY
             | meteora_amm::discriminators::REMOVE_LIQUIDITY
+            | meteora_amm::discriminators::REMOVE_LIQUIDITY_SINGLE_SIDE
+            | meteora_amm::discriminators::BOOTSTRAP_LIQUIDITY
+            | meteora_amm::discriminators::INITIALIZE_PERMISSIONED_POOL
+            | meteora_amm::discriminators::INITIALIZE_PERMISSIONLESS_POOL
+            | meteora_amm::discriminators::INITIALIZE_PERMISSIONLESS_POOL_WITH_FEE_TIER
+            | meteora_amm::discriminators::INITIALIZE_CUSTOMIZABLE_POOL
             | meteora_amm::discriminators::CREATE_POOL
+            | meteora_amm::discriminators::CREATE_POOL_WITH_CONFIG2
+            | meteora_amm::discriminators::SET_POOL_FEES
     )
 }
 
@@ -229,6 +255,10 @@ pub(crate) fn instruction_data_may_parse(program_id: &Pubkey, instruction_data: 
     if *program_id == METEORA_DLMM_PROGRAM_ID {
         return supports_meteora_dlmm_instruction(instruction_data);
     }
+    if *program_id == METEORA_DBC_PROGRAM_ID {
+        return instruction_data.get(..8) == Some(&[228, 69, 165, 46, 81, 203, 154, 29])
+            && instruction_data.len() >= 16;
+    }
     if *program_id == METEORA_DAMM_V2_PROGRAM_ID {
         return supports_meteora_damm_v2_instruction(instruction_data);
     }
@@ -262,6 +292,9 @@ pub(crate) fn normal_instruction_data_may_parse(
     program_id: &Pubkey,
     instruction_data: &[u8],
 ) -> bool {
+    if *program_id == METEORA_DBC_PROGRAM_ID {
+        return false;
+    }
     if *program_id == METEORA_DAMM_V2_PROGRAM_ID {
         return disc8(instruction_data)
             .is_some_and(|disc| disc == meteora_damm::discriminators::INITIALIZE_POOL);
@@ -298,6 +331,24 @@ pub fn parse_instruction_unified(
     // 快速检查指令数据长度，避免无效解析
     if instruction_data.is_empty() {
         return None;
+    }
+
+    if *program_id == METEORA_DBC_PROGRAM_ID {
+        if event_type_filter.is_some_and(|f| !f.includes_meteora_dbc()) {
+            return None;
+        }
+        let metadata = crate::logs::utils::create_metadata_simple(
+            signature,
+            slot,
+            tx_index,
+            block_time_us,
+            Pubkey::default(),
+            grpc_recv_us,
+        );
+        return filter_parsed_event(
+            crate::logs::meteora_dbc::parse_event_cpi(instruction_data, metadata),
+            event_type_filter,
+        );
     }
 
     // 根据程序 ID 路由到相应的解析器，按使用频率排序
@@ -556,7 +607,7 @@ mod tests {
     fn instruction_data_gate_rejects_unknown_program_and_event_cpi_layouts() {
         assert!(!instruction_data_may_parse(&Pubkey::new_unique(), &data8([1; 8])));
         assert!(!instruction_data_may_parse(&PUMPSWAP_PROGRAM_ID, &data8([0xff; 8])));
-        assert!(!instruction_data_may_parse(
+        assert!(instruction_data_may_parse(
             &PUMPFUN_PROGRAM_ID,
             &data8(pump::discriminators::MIGRATE_BONDING_CURVE_CREATOR)
         ));

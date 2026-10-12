@@ -369,6 +369,27 @@ fn parse_create_event_optimized(
         offset += uri_len;
 
         // 快速边界检查
+        if data.len() - offset == 96 {
+            return Some(DexEvent::PumpFunCreate(PumpFunCreateTokenEvent {
+                metadata: EventMetadata {
+                    signature,
+                    slot,
+                    tx_index,
+                    block_time_us: block_time_us.unwrap_or(0),
+                    grpc_recv_us,
+                    recent_blockhash: None,
+                },
+                name: name.to_string(),
+                symbol: symbol.to_string(),
+                uri: uri.to_string(),
+                mint: read_pubkey_unchecked(data, offset),
+                bonding_curve: read_pubkey_unchecked(data, offset + 32),
+                user: read_pubkey_unchecked(data, offset + 64),
+                ix_name: "create".into(),
+                quote_mint: PUMPFUN_SOLSCAN_SOL_QUOTE_MINT,
+                ..Default::default()
+            }));
+        }
         if data.len() < offset + 32 + 32 + 32 + 32 + 8 + 8 + 8 + 8 + 8 + 32 + 1 {
             return None;
         }
@@ -462,6 +483,7 @@ fn parse_create_event_optimized(
             virtual_quote_reserves,
             creator_fee_bps,
             is_holder_reward,
+            depth: data.get(offset + 1).copied().unwrap_or(0),
             ix_name: "create".to_string(),
             ..Default::default()
         }))
@@ -608,6 +630,7 @@ fn parse_trade_event_optimized(
         };
 
         let trade_event = PumpFunTradeEvent {
+            creator_fee_unclaimed: read_optional_u64(data, &mut offset),
             metadata,
             mint,
             sol_amount,
@@ -670,10 +693,12 @@ fn parse_trade_event_optimized(
 
         // 根据 ix_name 返回不同的事件类型，支持用户过滤特定交易类型
         match ix_kind {
-            "buy" => Some(DexEvent::PumpFunBuy(trade_event)),
-            "sell" => Some(DexEvent::PumpFunSell(trade_event)),
+            "buy" | "buy_v3" => Some(DexEvent::PumpFunBuy(trade_event)),
+            "sell" | "sell_v3" => Some(DexEvent::PumpFunSell(trade_event)),
             "buy_exact_sol_in" => Some(DexEvent::PumpFunBuyExactSolIn(trade_event)),
-            "buy_exact_quote_in" => Some(DexEvent::PumpFunBuy(trade_event)),
+            "buy_exact_quote_in" | "buy_exact_quote_in_v3" => {
+                Some(DexEvent::PumpFunBuy(trade_event))
+            }
             _ => Some(DexEvent::PumpFunTrade(trade_event)), // 兼容旧版本或未知类型
         }
     }
@@ -933,6 +958,7 @@ pub fn parse_trade_from_data(
         ) = read_trade_event_extensions(data, &mut offset)?;
 
         let trade_event = PumpFunTradeEvent {
+            creator_fee_unclaimed: read_optional_u64(data, &mut offset),
             metadata,
             mint,
             sol_amount,
@@ -995,10 +1021,12 @@ pub fn parse_trade_from_data(
 
         // 根据 ix_name 返回不同的事件类型
         match ix_kind {
-            "buy" => Some(DexEvent::PumpFunBuy(trade_event)),
-            "sell" => Some(DexEvent::PumpFunSell(trade_event)),
+            "buy" | "buy_v3" => Some(DexEvent::PumpFunBuy(trade_event)),
+            "sell" | "sell_v3" => Some(DexEvent::PumpFunSell(trade_event)),
             "buy_exact_sol_in" => Some(DexEvent::PumpFunBuyExactSolIn(trade_event)),
-            "buy_exact_quote_in" => Some(DexEvent::PumpFunBuy(trade_event)),
+            "buy_exact_quote_in" | "buy_exact_quote_in_v3" => {
+                Some(DexEvent::PumpFunBuy(trade_event))
+            }
             _ => Some(DexEvent::PumpFunTrade(trade_event)),
         }
     }
@@ -1067,6 +1095,20 @@ pub fn parse_create_from_data(data: &[u8], metadata: EventMetadata) -> Option<De
         let (uri, uri_len) = read_str_unchecked(data, offset)?;
         offset += uri_len;
 
+        if data.len() - offset == 96 {
+            return Some(DexEvent::PumpFunCreate(PumpFunCreateTokenEvent {
+                metadata,
+                name: name.to_string(),
+                symbol: symbol.to_string(),
+                uri: uri.to_string(),
+                mint: read_pubkey_unchecked(data, offset),
+                bonding_curve: read_pubkey_unchecked(data, offset + 32),
+                user: read_pubkey_unchecked(data, offset + 64),
+                ix_name: "create".into(),
+                quote_mint: PUMPFUN_SOLSCAN_SOL_QUOTE_MINT,
+                ..Default::default()
+            }));
+        }
         if data.len() < offset + 32 + 32 + 32 + 32 + 8 + 8 + 8 + 8 + 8 + 32 + 1 {
             return None;
         }
@@ -1147,6 +1189,7 @@ pub fn parse_create_from_data(data: &[u8], metadata: EventMetadata) -> Option<De
             virtual_quote_reserves,
             creator_fee_bps,
             is_holder_reward,
+            depth: data.get(offset + 1).copied().unwrap_or(0),
             ix_name: "create".to_string(),
             ..Default::default()
         }))

@@ -1,3 +1,4 @@
+pub mod liquidity_snapshot;
 pub mod nonce;
 pub mod orca_whirlpool;
 pub mod program_ids;
@@ -50,7 +51,8 @@ pub fn parse_account_unified(
                 use crate::grpc::EventType;
                 matches!(
                     t,
-                    EventType::TokenAccount
+                    EventType::AccountLiquiditySnapshot
+                        | EventType::TokenAccount
                         | EventType::TokenInfo
                         | EventType::NonceAccount
                         | EventType::AccountPumpFunGlobal
@@ -66,6 +68,7 @@ pub fn parse_account_unified(
                         | EventType::AccountRaydiumClmmTickArrayState
                         | EventType::AccountRaydiumCpmmAmmConfig
                         | EventType::AccountRaydiumCpmmPoolState
+                        | EventType::AccountRaydiumCpmmCreatorFeeShare
                         | EventType::AccountOrcaWhirlpool
                         | EventType::AccountOrcaPosition
                         | EventType::AccountOrcaTickArray
@@ -79,6 +82,13 @@ pub fn parse_account_unified(
         }
     }
 
+    if event_type_filter
+        .is_none_or(|f| f.should_include(crate::grpc::EventType::AccountLiquiditySnapshot))
+    {
+        if let Some(event) = liquidity_snapshot::parse_account(account, metadata.clone()) {
+            return Some(event);
+        }
+    }
     if account.owner == PUMPSWAP_PROGRAM_ID {
         let should_parse = event_type_filter.is_none_or(|filter| {
             filter.should_include(crate::grpc::EventType::AccountPumpSwapGlobalConfig)
@@ -116,6 +126,7 @@ pub fn parse_account_unified(
         let should_parse = event_type_filter.is_none_or(|filter| {
             filter.should_include(crate::grpc::EventType::AccountRaydiumCpmmAmmConfig)
                 || filter.should_include(crate::grpc::EventType::AccountRaydiumCpmmPoolState)
+                || filter.should_include(crate::grpc::EventType::AccountRaydiumCpmmCreatorFeeShare)
         });
         if should_parse {
             let event = filter_parsed_event(
@@ -304,6 +315,11 @@ fn parse_pumpfun_account(account: &AccountData, metadata: EventMetadata) -> Opti
             flat_fees: read_fees(data, &mut offset)?,
             fee_tiers: read_fee_tiers(data, &mut offset)?,
             stable_fee_tiers: read_fee_tiers(data, &mut offset)?,
+            exotic_flat_fees: if data.len() == offset {
+                PumpFeesFees::default()
+            } else {
+                read_fees(data, &mut offset)?
+            },
         };
         return Some(DexEvent::PumpFunFeeConfigAccount(PumpFunFeeConfigAccountEvent {
             metadata,
@@ -449,6 +465,12 @@ fn parse_pumpfun_account(account: &AccountData, metadata: EventMetadata) -> Opti
             metadata,
             pubkey: account.pubkey,
             bonding_curve: PumpFunBondingCurve {
+                creator_fee: read_u64_le(data, 117).unwrap_or_default(),
+                protocol_fees: read_u64_le(data, 125).unwrap_or_default(),
+                depth: read_u8(data, 133).unwrap_or_default(),
+                initial_virtual_quote_reserves: read_u64_le(data, 134).unwrap_or_default(),
+                post_complete_base_out: read_u64_le(data, 142).unwrap_or_default(),
+                post_complete_quote_in: read_u64_le(data, 150).unwrap_or_default(),
                 virtual_token_reserves,
                 virtual_quote_reserves,
                 real_token_reserves,
@@ -538,6 +560,18 @@ fn parse_pumpfun_account(account: &AccountData, metadata: EventMetadata) -> Opti
     };
 
     let global = PumpFunGlobal {
+        creator_fee_configurable: data.get(1037).is_some_and(|b| *b == 1),
+        max_configurable_creator_fee_bps: data
+            .get(1038..1046)
+            .map(|b| u64::from_le_bytes(b.try_into().unwrap()))
+            .unwrap_or(0),
+        holder_reward_claim_authority: data
+            .get(1046..1078)
+            .map(|b| solana_sdk::pubkey::Pubkey::new_from_array(b.try_into().unwrap()))
+            .unwrap_or_default(),
+        is_holder_reward_enabled: data.get(1078).is_some_and(|b| *b == 1),
+        max_curve_depth: data.get(1079).copied().unwrap_or(0),
+
         initialized,
         authority,
         fee_recipient,

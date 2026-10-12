@@ -12,7 +12,8 @@ pub enum OrderMode {
     #[default]
     Unordered,
     /// 有序模式：按 slot + tx_index 排序后输出
-    /// 同一 slot 内的交易会等待收齐后按 tx_index 排序
+    /// 新 slot 或超时触发排序输出；不保证已收齐全部交易。
+    /// 已关闭 slot 或输出水位之前的迟到事件会丢弃并记录 continuity break 警告。
     /// 延迟增加约 1-50ms（取决于 slot 内交易数量）
     Ordered,
     /// 流式有序模式：连续序列立即释放，低延迟 + 顺序保证
@@ -36,6 +37,8 @@ pub struct ClientConfig {
     /// 是否启用TLS
     pub enable_tls: bool,
     pub max_retries: u32,
+    /// Automatic reconnect base delay; exponential backoff caps at 60s and resets
+    /// after an established stream. Zero is clamped to 1ms to avoid a busy loop.
     pub retry_delay_ms: u64,
     pub max_concurrent_streams: u32,
     pub keep_alive_interval_ms: u64,
@@ -261,7 +264,7 @@ pub enum EventType {
     PumpFunCreateV2, // SPL-22 / Mayhem create
     PumpFunComplete,
     PumpFunMigrate,
-    /// Pump fees（`pfeeUx...`，`idls/pump_fees.json` Program data events）
+    /// Pump fees（`pfeeUx...`，`idl/pump_fees.json` Program data events）
     PumpFeesCreateFeeSharingConfig,
     PumpFeesInitializeFeeConfig,
     PumpFeesResetFeeSharingConfig,
@@ -336,15 +339,23 @@ pub enum EventType {
     MeteoraDammV2RemoveLiquidity,
     MeteoraDammV2InitializePool,
     MeteoraDammV2CreatePosition,
+    MeteoraDammV2ClaimPositionFee,
+    MeteoraDammV2ClaimReward,
+    MeteoraDlmmClaimReward,
     MeteoraDammV2ClosePosition,
     MeteoraDammV2UpdateDelegatePermission,
     MeteoraDammV2WithdrawDeadLiquidityReward,
+    MeteoraDammV2WithdrawIneligibleReward,
+    MeteoraDammV2UpdateRewardFunder,
+    MeteoraDammV2UpdateRewardDuration,
+    MeteoraDammV2InitializeReward,
+    MeteoraDammV2FundReward,
     MeteoraDammV2CreateConfig,
     MeteoraDammV2CreateDynamicConfig,
-    // MeteoraDammV2ClaimPositionFee,
     // MeteoraDammV2InitializeReward,
     // MeteoraDammV2FundReward,
     // MeteoraDammV2ClaimReward,
+    // MeteoraDlmmClaimReward,
 
     // Meteora DBC events
     MeteoraDbcSwap,
@@ -379,11 +390,19 @@ pub enum EventType {
     AccountRaydiumClmmTickArrayState,
     AccountRaydiumCpmmAmmConfig,
     AccountRaydiumCpmmPoolState,
+    RaydiumCpmmCollectCreatorFee,
+    AccountRaydiumCpmmCreatorFeeShare,
     AccountOrcaWhirlpool,
     AccountOrcaPosition,
     AccountOrcaTickArray,
+    AccountLiquiditySnapshot,
+    /// Raw subscription bytes with slot/write_version; explicitly opt in via include_only.
+    AccountRawSnapshot,
     AccountOrcaFeeTier,
     AccountOrcaWhirlpoolsConfig,
+    PumpFunPostCompleteBuy,
+    PumpFunSweepBondingCurveFee,
+    PumpSwapSweepPoolFee,
 }
 
 #[derive(Debug, Clone)]
@@ -518,6 +537,8 @@ impl EventTypeFilter {
             EventType::PumpFunComplete,
             EventType::PumpFunMigrate,
             EventType::PumpFunMigrateBondingCurveCreator,
+            EventType::PumpFunPostCompleteBuy,
+            EventType::PumpFunSweepBondingCurveFee,
         ])
     }
 
@@ -527,11 +548,18 @@ impl EventTypeFilter {
             EventType::MeteoraDammV2Swap,
             EventType::MeteoraDammV2AddLiquidity,
             EventType::MeteoraDammV2CreatePosition,
+            EventType::MeteoraDammV2ClaimPositionFee,
+            EventType::MeteoraDammV2ClaimReward,
             EventType::MeteoraDammV2ClosePosition,
             EventType::MeteoraDammV2InitializePool,
             EventType::MeteoraDammV2RemoveLiquidity,
             EventType::MeteoraDammV2UpdateDelegatePermission,
             EventType::MeteoraDammV2WithdrawDeadLiquidityReward,
+            EventType::MeteoraDammV2WithdrawIneligibleReward,
+            EventType::MeteoraDammV2UpdateRewardFunder,
+            EventType::MeteoraDammV2UpdateRewardDuration,
+            EventType::MeteoraDammV2InitializeReward,
+            EventType::MeteoraDammV2FundReward,
             EventType::MeteoraDammV2CreateConfig,
             EventType::MeteoraDammV2CreateDynamicConfig,
         ])
@@ -560,6 +588,7 @@ impl EventTypeFilter {
             EventType::PumpSwapBuy,
             EventType::PumpSwapSell,
             EventType::PumpSwapCreatePool,
+            EventType::PumpSwapSweepPoolFee,
             EventType::PumpSwapLiquidityAdded,
             EventType::PumpSwapLiquidityRemoved,
         ])
@@ -582,6 +611,7 @@ impl EventTypeFilter {
             EventType::RaydiumCpmmDeposit,
             EventType::RaydiumCpmmWithdraw,
             EventType::RaydiumCpmmInitialize,
+            EventType::RaydiumCpmmCollectCreatorFee,
         ])
     }
 
@@ -652,6 +682,7 @@ impl EventTypeFilter {
             EventType::MeteoraDlmmCreatePosition,
             EventType::MeteoraDlmmClosePosition,
             EventType::MeteoraDlmmClaimFee,
+            EventType::MeteoraDlmmClaimReward,
         ])
     }
 
@@ -715,6 +746,10 @@ pub fn event_type_from_dex_event(event: &crate::core::events::DexEvent) -> Optio
         DexEvent::PumpFeesUpdateFeeConfig(_) => Some(EventType::PumpFeesUpdateFeeConfig),
         DexEvent::PumpFeesUpdateFeeShares(_) => Some(EventType::PumpFeesUpdateFeeShares),
         DexEvent::PumpFeesUpsertFeeTiers(_) => Some(EventType::PumpFeesUpsertFeeTiers),
+        DexEvent::PumpFunPostCompleteBuy(_) => Some(EventType::PumpFunPostCompleteBuy),
+        DexEvent::PumpFunSweepBondingCurveFee(_) => Some(EventType::PumpFunSweepBondingCurveFee),
+        DexEvent::PumpFunComplete(_) => Some(EventType::PumpFunComplete),
+        DexEvent::PumpSwapSweepPoolFee(_) => Some(EventType::PumpSwapSweepPoolFee),
         DexEvent::PumpFunMigrateBondingCurveCreator(_) => {
             Some(EventType::PumpFunMigrateBondingCurveCreator)
         }
@@ -735,6 +770,11 @@ pub fn event_type_from_dex_event(event: &crate::core::events::DexEvent) -> Optio
         DexEvent::PumpSwapLiquidityAdded(_) => Some(EventType::PumpSwapLiquidityAdded),
         DexEvent::PumpSwapLiquidityRemoved(_) => Some(EventType::PumpSwapLiquidityRemoved),
         DexEvent::MeteoraDammV2Swap(_) => Some(EventType::MeteoraDammV2Swap),
+        DexEvent::MeteoraDammV2ClaimPositionFee(_) => {
+            Some(EventType::MeteoraDammV2ClaimPositionFee)
+        }
+        DexEvent::MeteoraDammV2ClaimReward(_) => Some(EventType::MeteoraDammV2ClaimReward),
+        DexEvent::MeteoraDlmmClaimReward(_) => Some(EventType::MeteoraDlmmClaimReward),
         DexEvent::MeteoraDammV2CreatePosition(_) => Some(EventType::MeteoraDammV2CreatePosition),
         DexEvent::MeteoraDammV2ClosePosition(_) => Some(EventType::MeteoraDammV2ClosePosition),
         DexEvent::MeteoraDammV2AddLiquidity(_) => Some(EventType::MeteoraDammV2AddLiquidity),
@@ -746,6 +786,19 @@ pub fn event_type_from_dex_event(event: &crate::core::events::DexEvent) -> Optio
         DexEvent::MeteoraDammV2WithdrawDeadLiquidityReward(_) => {
             Some(EventType::MeteoraDammV2WithdrawDeadLiquidityReward)
         }
+        DexEvent::MeteoraDammV2WithdrawIneligibleReward(_) => {
+            Some(EventType::MeteoraDammV2WithdrawIneligibleReward)
+        }
+        DexEvent::MeteoraDammV2UpdateRewardFunder(_) => {
+            Some(EventType::MeteoraDammV2UpdateRewardFunder)
+        }
+        DexEvent::MeteoraDammV2UpdateRewardDuration(_) => {
+            Some(EventType::MeteoraDammV2UpdateRewardDuration)
+        }
+        DexEvent::MeteoraDammV2InitializeReward(_) => {
+            Some(EventType::MeteoraDammV2InitializeReward)
+        }
+        DexEvent::MeteoraDammV2FundReward(_) => Some(EventType::MeteoraDammV2FundReward),
         DexEvent::MeteoraDammV2CreateConfig(_) => Some(EventType::MeteoraDammV2CreateConfig),
         DexEvent::MeteoraDammV2CreateDynamicConfig(_) => {
             Some(EventType::MeteoraDammV2CreateDynamicConfig)
@@ -794,6 +847,10 @@ pub fn event_type_from_dex_event(event: &crate::core::events::DexEvent) -> Optio
         DexEvent::RaydiumCpmmInitialize(_) => Some(EventType::RaydiumCpmmInitialize),
         DexEvent::RaydiumCpmmAmmConfigAccount(_) => Some(EventType::AccountRaydiumCpmmAmmConfig),
         DexEvent::RaydiumCpmmPoolStateAccount(_) => Some(EventType::AccountRaydiumCpmmPoolState),
+        DexEvent::RaydiumCpmmCollectCreatorFee(_) => Some(EventType::RaydiumCpmmCollectCreatorFee),
+        DexEvent::RaydiumCpmmCreatorFeeShareAccount(_) => {
+            Some(EventType::AccountRaydiumCpmmCreatorFeeShare)
+        }
         DexEvent::RaydiumAmmV4Swap(_) => Some(EventType::RaydiumAmmV4Swap),
         DexEvent::RaydiumAmmV4Deposit(_) => Some(EventType::RaydiumAmmV4Deposit),
         DexEvent::RaydiumAmmV4Initialize2(_) => Some(EventType::RaydiumAmmV4Initialize2),
@@ -810,6 +867,8 @@ pub fn event_type_from_dex_event(event: &crate::core::events::DexEvent) -> Optio
         DexEvent::OrcaWhirlpoolAccount(_) => Some(EventType::AccountOrcaWhirlpool),
         DexEvent::OrcaPositionAccount(_) => Some(EventType::AccountOrcaPosition),
         DexEvent::OrcaTickArrayAccount(_) => Some(EventType::AccountOrcaTickArray),
+        DexEvent::LiquidityAccountSnapshot(_) => Some(EventType::AccountLiquiditySnapshot),
+        DexEvent::RawAccountSnapshot(_) => Some(EventType::AccountRawSnapshot),
         DexEvent::OrcaFeeTierAccount(_) => Some(EventType::AccountOrcaFeeTier),
         DexEvent::OrcaWhirlpoolsConfigAccount(_) => Some(EventType::AccountOrcaWhirlpoolsConfig),
         DexEvent::MeteoraPoolsSwap(_) => Some(EventType::MeteoraPoolsSwap),
@@ -964,6 +1023,7 @@ mod event_type_filter_tests {
             EventType::RaydiumCpmmDeposit,
             EventType::RaydiumCpmmWithdraw,
             EventType::RaydiumCpmmInitialize,
+            EventType::RaydiumCpmmCollectCreatorFee,
         ]);
         assert!(!all_cpmm.includes_raydium_cpmm());
 

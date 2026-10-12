@@ -9,6 +9,10 @@ use solana_sdk::{pubkey::Pubkey, signature::Signature};
 
 /// PumpFun discriminator constants
 pub mod discriminators {
+    pub const BUY_V3: [u8; 8] = [7, 5, 29, 196, 245, 23, 101, 80];
+    pub const BUY_EXACT_QUOTE_IN_V3: [u8; 8] = [225, 247, 80, 30, 213, 179, 132, 136];
+    pub const SELL_V3: [u8; 8] = [28, 146, 222, 119, 38, 196, 105, 213];
+
     /// Buy instruction: buy tokens with SOL (legacy)
     pub const BUY: [u8; 8] = [102, 6, 61, 18, 1, 218, 235, 234];
     /// Sell instruction: sell tokens for SOL (legacy)
@@ -21,7 +25,7 @@ pub mod discriminators {
     pub const BUY_EXACT_SOL_IN: [u8; 8] = [56, 252, 116, 8, 158, 223, 205, 95];
     /// Migrate event log discriminator (CPI)
     pub const MIGRATE_EVENT_LOG: [u8; 8] = [189, 233, 93, 185, 92, 148, 234, 148];
-    /// `migrate_bonding_curve_creator` 外层 ix（`idls/pumpfun.json`）
+    /// `migrate_bonding_curve_creator` 外层 ix（`idl/pumpfun.json`）
     pub const MIGRATE_BONDING_CURVE_CREATOR: [u8; 8] = [87, 124, 52, 191, 52, 38, 214, 232];
     /// buy_v2: unified buy with quote_mint support (SOL + USDC)
     pub const BUY_V2: [u8; 8] = [184, 23, 238, 97, 103, 197, 211, 61];
@@ -33,24 +37,6 @@ pub mod discriminators {
 
 /// PumpFun Program ID
 pub const PROGRAM_ID_PUBKEY: Pubkey = program_ids::PUMPFUN_PROGRAM_ID;
-
-#[inline(always)]
-fn create_v2_quote_accounts_from_accounts(accounts: &[Pubkey]) -> (Pubkey, Pubkey, Pubkey) {
-    if accounts.len() < 19 {
-        return (PUMPFUN_SOLSCAN_SOL_QUOTE_MINT, Pubkey::default(), Pubkey::default());
-    }
-    let quote_mint = get_account(accounts, 16).unwrap_or_default();
-    let quote_vault = get_account(accounts, 17).unwrap_or_default();
-    let quote_token_program = get_account(accounts, 18).unwrap_or_default();
-    if quote_mint == Pubkey::default()
-        || quote_mint == program_ids::PUMPFUN_PROGRAM_ID
-        || quote_vault == Pubkey::default()
-        || quote_token_program == Pubkey::default()
-    {
-        return (Pubkey::default(), Pubkey::default(), Pubkey::default());
-    }
-    (normalize_pumpfun_quote_mint(quote_mint), quote_vault, quote_token_program)
-}
 
 /// Main PumpFun instruction parser
 ///
@@ -133,6 +119,115 @@ pub fn parse_instruction(
             false,
         );
     }
+    if outer_disc == [7, 5, 29, 196, 245, 23, 101, 80] {
+        if accounts.len() != 17
+            || data.len() < 16
+            || data.len() > 17
+            || (data.len() == 17 && data[16] > 1)
+        {
+            return None;
+        }
+        let mut mapped = [Pubkey::default(); 27];
+        mapped[0] = accounts[0];
+        mapped[1] = accounts[1];
+        mapped[2] = accounts[2];
+        mapped[3] = accounts[3];
+        mapped[4] = accounts[4];
+        mapped[8] = accounts[13];
+        mapped[10] = accounts[5];
+        mapped[11] = accounts[6];
+        mapped[12] = accounts[7];
+        mapped[13] = accounts[8];
+        mapped[14] = accounts[9];
+        mapped[15] = accounts[10];
+        mapped[20] = accounts[11];
+        mapped[22] = accounts[12];
+        mapped[24] = accounts[14];
+        mapped[25] = accounts[15];
+        mapped[26] = accounts[16];
+        return parse_buy_v2_instruction(
+            data,
+            &mapped,
+            signature,
+            slot,
+            tx_index,
+            block_time_us,
+            grpc_recv_us,
+            "buy_v3",
+            false,
+        );
+    }
+    if outer_disc == [225, 247, 80, 30, 213, 179, 132, 136] {
+        if accounts.len() != 17
+            || data.len() < 16
+            || data.len() > 17
+            || (data.len() == 17 && data[16] > 1)
+        {
+            return None;
+        }
+        let mut mapped = [Pubkey::default(); 27];
+        mapped[0] = accounts[0];
+        mapped[1] = accounts[1];
+        mapped[2] = accounts[2];
+        mapped[3] = accounts[3];
+        mapped[4] = accounts[4];
+        mapped[8] = accounts[13];
+        mapped[10] = accounts[5];
+        mapped[11] = accounts[6];
+        mapped[12] = accounts[7];
+        mapped[13] = accounts[8];
+        mapped[14] = accounts[9];
+        mapped[15] = accounts[10];
+        mapped[20] = accounts[11];
+        mapped[22] = accounts[12];
+        mapped[24] = accounts[14];
+        mapped[25] = accounts[15];
+        mapped[26] = accounts[16];
+        return parse_buy_v2_instruction(
+            data,
+            &mapped,
+            signature,
+            slot,
+            tx_index,
+            block_time_us,
+            grpc_recv_us,
+            "buy_exact_quote_in_v3",
+            true,
+        );
+    }
+    if outer_disc == [28, 146, 222, 119, 38, 196, 105, 213] {
+        if accounts.len() != 17 || data.len() < 16 || data.len() > 17 || data.len() != 16 {
+            return None;
+        }
+        let mut mapped = [Pubkey::default(); 27];
+        mapped[0] = accounts[0];
+        mapped[1] = accounts[1];
+        mapped[2] = accounts[2];
+        mapped[3] = accounts[3];
+        mapped[4] = accounts[4];
+        mapped[8] = accounts[13];
+        mapped[10] = accounts[5];
+        mapped[11] = accounts[6];
+        mapped[12] = accounts[7];
+        mapped[13] = accounts[8];
+        mapped[14] = accounts[9];
+        mapped[15] = accounts[10];
+        mapped[19] = accounts[11];
+        mapped[21] = accounts[12];
+        mapped[23] = accounts[14];
+        mapped[24] = accounts[15];
+        mapped[25] = accounts[16];
+        return parse_sell_v2_instruction(
+            data,
+            &mapped,
+            signature,
+            slot,
+            tx_index,
+            block_time_us,
+            grpc_recv_us,
+            "sell_v3",
+        );
+    }
     if outer_disc == discriminators::BUY_V2 {
         return parse_buy_v2_instruction(
             data,
@@ -170,6 +265,30 @@ pub fn parse_instruction(
             grpc_recv_us,
             "sell_v2",
         );
+    }
+
+    if outer_disc == discriminators::MIGRATE_BONDING_CURVE_CREATOR {
+        if accounts.len() < 5 {
+            return None;
+        }
+        return Some(DexEvent::PumpFunMigrateBondingCurveCreator(
+            PumpFunMigrateBondingCurveCreatorEvent {
+                metadata: create_metadata(
+                    signature,
+                    slot,
+                    tx_index,
+                    block_time_us.unwrap_or_default(),
+                    grpc_recv_us,
+                ),
+                timestamp: 0,
+                mint: accounts[0],
+                bonding_curve: accounts[1],
+                sharing_config: accounts[2],
+                // Creator values require execution/account state; the config address is not a creator.
+                old_creator: Pubkey::default(),
+                new_creator: Pubkey::default(),
+            },
+        ));
     }
 
     // Inner CPI：仅 MIGRATE 在此解析
@@ -577,7 +696,7 @@ fn parse_create_instruction(
     block_time_us: Option<i64>,
     grpc_recv_us: i64,
 ) -> Option<DexEvent> {
-    if accounts.len() < 8 {
+    if accounts.len() < 10 {
         return None;
     }
 
@@ -585,47 +704,29 @@ fn parse_create_instruction(
 
     // Parse args: name (string), symbol (string), uri (string), creator (pubkey)
     // String format: 4-byte length prefix + content
-    let name = if let Some((s, len)) = read_str_unchecked(data, offset) {
-        offset += len;
-        s.to_string()
-    } else {
-        String::new()
-    };
+    let (name, len) = read_str_unchecked(data, offset)?;
+    offset += len;
+    let name = name.to_string();
 
-    let symbol = if let Some((s, len)) = read_str_unchecked(data, offset) {
-        offset += len;
-        s.to_string()
-    } else {
-        String::new()
-    };
+    let (symbol, len) = read_str_unchecked(data, offset)?;
+    offset += len;
+    let symbol = symbol.to_string();
 
-    let uri = if let Some((s, len)) = read_str_unchecked(data, offset) {
-        offset += len;
-        s.to_string()
-    } else {
-        String::new()
-    };
+    let (uri, len) = read_str_unchecked(data, offset)?;
+    offset += len;
+    let uri = uri.to_string();
 
-    // 读取 mint, bonding_curve, user, creator (在 name, symbol, uri 之后)
-    if data.len() < offset + 32 + 32 + 32 + 32 {
-        return None;
-    }
-
-    let mint = read_pubkey(data, offset).unwrap_or_default();
-    offset += 32;
-
-    let bonding_curve = read_pubkey(data, offset).unwrap_or_default();
-    offset += 32;
-
-    let user = read_pubkey(data, offset).unwrap_or_default();
-    offset += 32;
-
-    let creator = read_pubkey(data, offset).unwrap_or_default();
+    // IDL args contain only creator after the strings; mint/curve/user are accounts.
+    // Historical create arguments end after URI; reject a partial creator key.
+    let creator = if offset == data.len() { Pubkey::default() } else { read_pubkey(data, offset)? };
+    let mint = accounts[0];
+    let bonding_curve = accounts[2];
+    let user = accounts[7];
 
     let metadata =
         create_metadata(signature, slot, tx_index, block_time_us.unwrap_or_default(), grpc_recv_us);
 
-    Some(DexEvent::PumpFunCreate(PumpFunCreateTokenEvent {
+    let mut event = PumpFunCreateTokenEvent {
         metadata,
         name,
         symbol,
@@ -637,7 +738,10 @@ fn parse_create_instruction(
         quote_mint: PUMPFUN_SOLSCAN_SOL_QUOTE_MINT,
         ix_name: "create".to_string(),
         ..Default::default()
-    }))
+    };
+    let get = |i| accounts.get(i).copied().unwrap_or_default();
+    crate::core::account_fillers::pumpfun::fill_create_accounts(&mut event, &get);
+    Some(DexEvent::PumpFunCreate(event))
 }
 
 /// Parse create_v2 instruction (SPL-22；Mayhem 由 **data** 中 `is_mayhem_mode` 决定，不要用 mayhem 程序账户是否非空推断)
@@ -646,7 +750,7 @@ fn parse_create_instruction(
 /// 3 associated_bonding_curve, 4 global, 5 user, 6 system_program, 7 token_program,
 /// 8 associated_token_program, 9 mayhem_program_id, 10 global_params, 11 sol_vault,
 /// 12 mayhem_state, 13 mayhem_token_vault, 14 event_authority, 15 program. 共 16 个账户。
-/// Quote-pool variant appends: 16 quote_mint, 17 quote_vault, 18 quote_token_program.
+/// The public IDL defines no quote accounts for create_v2; remaining accounts are not inferred.
 /// Instruction args (after disc): name, symbol, uri, creator, is_mayhem_mode (`bool`), is_cashback_enabled (`OptionBool` = 1-byte bool on wire)。
 /// Guard: return None when accounts.len() < 16 to avoid index out of bounds (e.g. ALT-loaded tx).
 fn parse_create_v2_instruction(
@@ -666,55 +770,36 @@ fn parse_create_v2_instruction(
 
     // IDL args: name, symbol, uri, creator, is_mayhem_mode, is_cashback_enabled — mint/bc/user 仅在 accounts
     let mut offset = 0usize;
-    let name = if let Some((s, len)) = read_str_unchecked(data, offset) {
-        offset += len;
-        s.to_string()
-    } else {
-        String::new()
-    };
-    let symbol = if let Some((s, len)) = read_str_unchecked(data, offset) {
-        offset += len;
-        s.to_string()
-    } else {
-        String::new()
-    };
-    let uri = if let Some((s, len)) = read_str_unchecked(data, offset) {
-        offset += len;
-        s.to_string()
-    } else {
-        String::new()
-    };
+    let (name, len) = read_str_unchecked(data, offset)?;
+    offset += len;
+    let (symbol, len) = read_str_unchecked(data, offset)?;
+    offset += len;
+    let (uri, len) = read_str_unchecked(data, offset)?;
+    offset += len;
     if data.len() < offset + 32 + 1 {
         return None;
     }
     let creator = read_pubkey(data, offset)?;
     offset += 32;
-    let is_mayhem_mode = read_bool(data, offset)?;
+    let is_mayhem_mode = read_option_bool_idl(data, offset)?;
     offset += 1;
-    let is_cashback_enabled = read_option_bool_idl(data, offset).unwrap_or(false);
-    if offset < data.len() {
-        offset += 1;
-    }
-    let creator_fee_bps = read_option_u64_idl(data, offset).unwrap_or_default();
-    if offset + 8 <= data.len() {
-        offset += 8;
-    }
-    let is_holder_reward = read_option_bool_idl(data, offset).unwrap_or_default();
+    let (is_cashback_enabled, creator_fee_bps, is_holder_reward) =
+        crate::instr::utils::parse_create_v2_optional_tail(&data[offset..])?;
 
     let mint = acc[0];
     let bonding_curve = acc[2];
     let user = acc[5];
     let (quote_mint, quote_vault, quote_token_program) =
-        create_v2_quote_accounts_from_accounts(accounts);
+        (PUMPFUN_SOLSCAN_SOL_QUOTE_MINT, Pubkey::default(), Pubkey::default());
 
     let metadata =
         create_metadata(signature, slot, tx_index, block_time_us.unwrap_or_default(), grpc_recv_us);
 
     Some(DexEvent::PumpFunCreate(PumpFunCreateTokenEvent {
         metadata,
-        name,
-        symbol,
-        uri,
+        name: name.to_string(),
+        symbol: symbol.to_string(),
+        uri: uri.to_string(),
         mint,
         bonding_curve,
         user,
@@ -838,6 +923,38 @@ mod tests {
     }
 
     #[test]
+    fn pumpfun_legacy_create_uses_idl_args_and_own_accounts() {
+        let mut data = discriminators::CREATE.to_vec();
+        str_arg("Token", &mut data);
+        str_arg("TOK", &mut data);
+        str_arg("uri", &mut data);
+        let creator = Pubkey::new_unique();
+        data.extend_from_slice(creator.as_ref());
+        for _ in 0..2 {
+            let acc = accounts(14);
+            let DexEvent::PumpFunCreate(event) =
+                parse_instruction(&data, &acc, Signature::default(), 1, 0, None, 99).unwrap()
+            else {
+                panic!("expected create")
+            };
+            assert_eq!(event.creator, creator);
+            assert_eq!(event.mint, acc[0]);
+            assert_eq!(event.mint_authority, acc[1]);
+            assert_eq!(event.bonding_curve, acc[2]);
+            assert_eq!(event.associated_bonding_curve, acc[3]);
+            assert_eq!(event.global, acc[4]);
+            assert_eq!(event.user, acc[7]);
+            assert_eq!(event.token_program, acc[9]);
+            assert_eq!(event.event_authority, acc[12]);
+            assert_eq!(event.program, acc[13]);
+        }
+        data.truncate(data.len() - 1);
+        assert!(
+            parse_instruction(&data, &accounts(14), Signature::default(), 1, 0, None, 0).is_none()
+        );
+    }
+
+    #[test]
     fn pumpfun_create_v2_instruction_emits_canonical_create() {
         let acc = accounts(16);
         let event =
@@ -866,7 +983,7 @@ mod tests {
     }
 
     #[test]
-    fn pumpfun_create_v2_instruction_uses_appended_quote_mint_only_for_19_accounts() {
+    fn pumpfun_create_v2_instruction_ignores_unknown_remaining_accounts() {
         let mut acc = accounts(19);
         acc[16] = PUMPFUN_WSOL_QUOTE_MINT;
         let event =
@@ -875,7 +992,7 @@ mod tests {
 
         match event {
             DexEvent::PumpFunCreate(c) => {
-                assert_eq!(c.quote_mint, PUMPFUN_WSOL_QUOTE_MINT);
+                assert_eq!(c.quote_mint, PUMPFUN_SOLSCAN_SOL_QUOTE_MINT);
             }
             other => panic!("expected canonical PumpFunCreate, got {other:?}"),
         }
@@ -892,7 +1009,7 @@ mod tests {
 
         match event {
             DexEvent::PumpFunCreate(c) => {
-                assert_eq!(c.quote_mint, Pubkey::default());
+                assert_eq!(c.quote_mint, PUMPFUN_SOLSCAN_SOL_QUOTE_MINT);
                 assert_eq!(c.quote_vault, Pubkey::default());
                 assert_eq!(c.quote_token_program, Pubkey::default());
             }
@@ -912,7 +1029,7 @@ mod tests {
 
         match event {
             DexEvent::PumpFunCreate(c) => {
-                assert_eq!(c.quote_mint, Pubkey::default());
+                assert_eq!(c.quote_mint, PUMPFUN_SOLSCAN_SOL_QUOTE_MINT);
                 assert_eq!(c.quote_vault, Pubkey::default());
                 assert_eq!(c.quote_token_program, Pubkey::default());
             }

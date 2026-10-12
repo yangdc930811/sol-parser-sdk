@@ -1,6 +1,6 @@
 //! LaunchLab 指令解析器
 //!
-//! 底层按 `idls/raydium_launchpad.json` 的真实 instruction discriminator
+//! 底层按 `idl/raydium_launchpad.json` 的真实 instruction discriminator
 //! 和账户布局解析，对外事件名统一为 `RaydiumLaunchlab*`。
 
 use super::program_ids;
@@ -8,7 +8,7 @@ use super::utils::*;
 use crate::core::events::*;
 use solana_sdk::{pubkey::Pubkey, signature::Signature};
 
-/// LaunchLab instruction discriminators from `idls/raydium_launchpad.json`.
+/// LaunchLab instruction discriminators from `idl/raydium_launchpad.json`.
 pub mod discriminators {
     pub const BUY_EXACT_IN: [u8; 8] = [250, 234, 13, 123, 213, 156, 19, 236];
     pub const BUY_EXACT_OUT: [u8; 8] = [24, 211, 116, 40, 105, 3, 153, 56];
@@ -101,9 +101,31 @@ pub fn parse_instruction(
             block_time_us,
             (10, 11),
         ),
-        // The LaunchLab IDL does not expose enough fields to synthesize a
-        // migration event with the SDK's migrate layout.
-        discriminators::MIGRATE_TO_AMM | discriminators::MIGRATE_TO_CPSWAP => None,
+        discriminators::MIGRATE_TO_AMM | discriminators::MIGRATE_TO_CPSWAP => {
+            let cp = discriminator == discriminators::MIGRATE_TO_CPSWAP;
+            if accounts.len() < if cp { 28 } else { 32 } || (!cp && data.len() < 17) {
+                return None;
+            }
+            let old_pool = get_account(accounts, if cp { 17 } else { 23 })?;
+            Some(DexEvent::RaydiumLaunchlabMigrateAmm(RaydiumLaunchlabMigrateAmmEvent {
+                metadata: create_metadata_simple(
+                    signature,
+                    slot,
+                    tx_index,
+                    block_time_us,
+                    old_pool,
+                ),
+                old_pool,
+                new_pool: get_account(accounts, if cp { 5 } else { 13 })?,
+                user: get_account(accounts, 0)?,
+                liquidity_amount: 0,
+                liquidity_amount_known: false,
+                base_mint: get_account(accounts, 1)?,
+                quote_mint: get_account(accounts, 2)?,
+                platform_config: if cp { get_account(accounts, 3)? } else { Pubkey::default() },
+                destination_program: get_account(accounts, if cp { 4 } else { 12 })?,
+            }))
+        }
         _ => None,
     }
 }
