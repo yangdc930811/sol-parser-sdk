@@ -1,16 +1,11 @@
-# sol-parser-sdk v0.8.0
+# sol-parser-sdk v0.10.0
 
-Uniform trade provenance, opt-in stock prices, and native-language examples.
+Released 2026-10-26.
 
-## Changes
+Fix ShredStream create_v2 callbacks with partially resolved ALT accounts and official PumpSwap multi_hop_swap callbacks through Pump.fun curves. Preserve instruction names, input/limit semantics, unknown quotes and create-before-trade ordering; never infer SOL paid from a non-SOL quote. Synchronize native replay examples and validation across languages.
 
-- Supported gRPC trade families carry optional original router instructions and TradeParseStatus. Unknown Pump.fun wrappers on Shred produce unresolved candidates without inventing direction or execution amounts.
-- Opt-in stock prices share the screened multi-issuer catalog with trade SDKs. Catalog admission uses $500 liquid-side reserve and no volume threshold; known lower fees are preferred. Historical catalog data is not live liquidity.
-- Missing conversion/liquidity observations stay unknown. Snapshot validation rejects blank sources and invalid price-impact bounds.
-- Organize examples and documentation; tests use the SDK's own language. Offline captured transactions do not represent fresh mainnet execution or production latency measurements.
+修复 ALT 账户未完全解析时 create_v2 回调和官方多跳内盘回调，保留正确指令名、输入/下限语义、未知报价及创建先于交易的顺序；同步各语言回放示例。
 
-## Migration
+## Validation / 验证
 
-third_program now contains RawInstructionPayload rather than a rule identifier. It does not contain duplicated metadata/dexes; metadata remains on the event. Check parse_status: Unresolved is only a possible DEX interaction, InstructionDecoded establishes input decoding, and ExecutionConfirmed reflects supplied execution evidence, not necessarily known fill amounts. Do not treat zero defaults as proven zero fills. Rust callers constructing trade structs must initialize the new fields or use ..Default::default().
-
-No RPC is performed by the parsing hot path. Explicit analysis/discovery tools can fetch RPC data outside that path. Wrapper reconstruction remains opt-in and is not proof of future third-party program behavior.
+Native-language regression suites and replay/build checks passed for the synchronized changes. Four trade implementations completed curve buy/sell and pool buy/sell unsigned mainnet simulations (16 successful simulations); these small-amount interface checks do not replace fresh production quotes. No transaction was broadcast.

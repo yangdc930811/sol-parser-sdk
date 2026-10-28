@@ -301,13 +301,8 @@ fn dispatch_shred_outer(
         if filter.is_some_and(|f| !f.includes_pumpfun()) || !pumpfun_outer_data_may_parse(data) {
             return;
         }
-        if !best_effort
-            && !instruction_keys_resolved(program_id_index, ix_accounts, static_keys.len())
-        {
-            return;
-        }
         let accounts = build_shred_ix_accounts(static_keys, ix_accounts);
-        if let Some(ev) = parse_pumpfun_instruction(
+        if let Some(mut ev) = parse_pumpfun_instruction(
             data,
             &accounts,
             signature,
@@ -317,6 +312,9 @@ fn dispatch_shred_outer(
             created_mints,
             mayhem_mints,
         ) {
+            if !best_effort {
+                preserve_unresolved_pumpfun_accounts(&mut ev, data, ix_accounts, static_keys.len());
+            }
             push_filtered_shred_event(events, ev, filter);
         }
         return;
@@ -348,6 +346,53 @@ fn dispatch_shred_outer(
         filter,
     ) {
         push_filtered_shred_event(events, ev, filter);
+    }
+}
+
+/// Missing ALT keys must stay unknown, even where legacy decoders supply a
+/// SOL quote sentinel or assume Token-2022. Instruction arguments remain usable.
+#[inline]
+fn preserve_unresolved_pumpfun_accounts(
+    event: &mut DexEvent,
+    data: &[u8],
+    indices: &[u8],
+    keys_len: usize,
+) {
+    let trade = match event {
+        DexEvent::PumpFunTrade(t)
+        | DexEvent::PumpFunBuy(t)
+        | DexEvent::PumpFunSell(t)
+        | DexEvent::PumpFunBuyExactSolIn(t) => t,
+        _ => return,
+    };
+    let missing =
+        |position: usize| indices.get(position).is_some_and(|&index| index as usize >= keys_len);
+    match disc8(data) {
+        Some(
+            discriminators::BUY_V2
+            | discriminators::BUY_EXACT_QUOTE_IN_V2
+            | discriminators::SELL_V2
+            | discriminators::BUY_V3
+            | discriminators::BUY_EXACT_QUOTE_IN_V3
+            | discriminators::SELL_V3,
+        ) => {
+            if missing(2) {
+                trade.quote_mint = Pubkey::default();
+            }
+            if missing(3) {
+                trade.token_program = Pubkey::default();
+            }
+            if missing(4) {
+                trade.quote_token_program = Pubkey::default();
+            }
+        }
+        Some(discriminators::BUY | discriminators::BUY_EXACT_SOL_IN) if missing(8) => {
+            trade.token_program = Pubkey::default();
+        }
+        Some(discriminators::SELL) if missing(9) => {
+            trade.token_program = Pubkey::default();
+        }
+        _ => {}
     }
 }
 
@@ -504,6 +549,12 @@ pub fn parse_transaction_dex_events(
     );
 }
 
+/// Decode known Pump.fun outer instructions even when ALT accounts are not loaded.
+/// Missing addresses are left at their defaults; this does not infer unknown programs
+/// or executed amounts. Use the loaded-addresses entry point for complete accounts.
+/// A third-party wrapper is observable only when this instruction's Pump.fun program
+/// reference is resolved. If that key lives in ALT, supply cached loaded addresses;
+/// neither an opaque wrapper nor its discriminator establishes the invoked DEX.
 #[inline]
 pub fn parse_transaction_dex_events_with_filter(
     transaction: &VersionedTransaction,
@@ -636,7 +687,19 @@ fn parse_transaction_with_account_keys(
     );
     let appended = &mut events[start..];
     crate::core::pumpfun_fee_enrich::enrich_pumpfun_same_tx_post_merge(appended);
-    let mut metadata = appended.iter_mut().filter_map(DexEvent::metadata_mut);
+    let version = match &transaction.message {
+        VersionedMessage::Legacy(_) => crate::grpc::YellowstoneMessageVersion::Legacy,
+        VersionedMessage::V0(_) => crate::grpc::YellowstoneMessageVersion::V0,
+        VersionedMessage::V1(_) => crate::grpc::YellowstoneMessageVersion::V1,
+    };
+    let mut metadata = appended.iter_mut().filter_map(|event| {
+        match event {
+            DexEvent::PumpFunCreate(create) => create.transaction_version = Some(version),
+            DexEvent::PumpFunCreateV2(create) => create.transaction_version = Some(version),
+            _ => {}
+        }
+        event.metadata_mut()
+    });
     if let Some(first) = metadata.next() {
         let blockhash = transaction.message.recent_blockhash().to_string();
         for item in metadata {
@@ -665,102 +728,73 @@ fn parse_transaction_pump_events_with_filter(
     } else {
         (PumpMintSet::new(), PumpMintSet::new())
     };
+    let message_key_count = transaction.message.static_account_keys().len()
+        + transaction
+            .message
+            .address_table_lookups()
+            .unwrap_or_default()
+            .iter()
+            .map(|lookup| lookup.writable_indexes.len() + lookup.readonly_indexes.len())
+            .sum::<usize>();
     for (instruction_index, ix) in transaction.message.instructions().iter().enumerate() {
         if let Some(program) = static_keys.get(ix.program_id_index as usize) {
-            let explicit_raw = filter.is_some_and(|f| {
-                f.include_only
-                    .as_ref()
-                    .is_some_and(|types| types.contains(&crate::grpc::EventType::RawInstruction))
-            });
-            let unknown = is_unknown_program_for_raw(program);
-            let dexes = if explicit_raw || unknown {
-                crate::core::events::raw_instruction_dexes(
-                    *program,
-                    &ix.accounts
+            if *program == PUMPSWAP_PROGRAM_ID
+                && ix.data.starts_with(&super::pump_multi_hop::MULTI_HOP_SWAP)
+            {
+                if filter.is_none_or(EventTypeFilter::includes_unresolved_pumpfun) {
+                    super::pump_multi_hop::parse_curve_hops(
+                        &ix.data,
+                        &ix.accounts,
+                        static_keys,
+                        instruction_index,
+                        EventMetadata {
+                            signature,
+                            slot,
+                            tx_index,
+                            grpc_recv_us: recv_us,
+                            ..Default::default()
+                        },
+                        |mut trade| {
+                            trade.is_created_buy =
+                                trade.is_buy && created_mints.contains(&trade.mint);
+                            events.push(DexEvent::PumpFunTrade(trade));
+                        },
+                    );
+                }
+                continue;
+            }
+            if is_third_party_program(program) {
+                // Scan indices without allocating. Only subscribed Pump.fun
+                // candidates copy the original outer instruction into a callback.
+                if filter.is_none_or(EventTypeFilter::includes_unresolved_pumpfun)
+                    && ix
+                        .accounts
                         .iter()
-                        .map(|i| static_keys.get(*i as usize).copied())
-                        .collect::<Vec<_>>(),
-                )
-            } else {
-                Vec::new()
-            };
-            if explicit_raw || unknown {
-                let pump_candidate = unknown
-                    && dexes
-                        .iter()
-                        .any(|d| d.dex_type == crate::core::events::RawInstructionDexType::PumpFun);
-                let emit_candidate = pump_candidate
-                    && !explicit_raw
-                    && filter.is_none_or(EventTypeFilter::includes_unresolved_pumpfun);
-                let emit_raw = !emit_candidate
-                    && if pump_candidate && !explicit_raw {
-                        // Keep other DEX subscriptions without reintroducing an
-                        // excluded Pump candidate through the raw-event API.
-                        dexes
-                            .iter()
-                            .filter(|d| {
-                                d.dex_type != crate::core::events::RawInstructionDexType::PumpFun
-                            })
-                            .any(|d| {
-                                filter.is_none_or(|f| {
-                                    crate::core::events::raw_instruction_matches_filter(
-                                        std::slice::from_ref(d),
-                                        f,
-                                    )
-                                })
-                            })
-                    } else {
-                        filter.is_none_or(|f| {
-                            crate::core::events::raw_instruction_matches_filter(&dexes, f)
-                        })
-                    };
-                if emit_candidate || emit_raw {
-                    let raw = crate::core::events::RawInstructionEvent {
+                        .any(|index| static_keys.get(*index as usize) == Some(&PROGRAM_ID_PUBKEY))
+                {
+                    events.push(DexEvent::PumpFunTrade(crate::core::events::PumpFunTradeEvent {
                         metadata: EventMetadata {
                             signature,
                             slot,
                             tx_index,
                             grpc_recv_us: recv_us,
-                            recent_blockhash: Some(
-                                transaction.message.recent_blockhash().to_string(),
-                            ),
                             ..Default::default()
                         },
-                        dexes,
-                        program_id: *program,
-                        instruction_index,
-                        accounts: ix
-                            .accounts
-                            .iter()
-                            .map(|i| static_keys.get(*i as usize).copied())
-                            .collect(),
-                        account_indices: ix.accounts.clone(),
-                        instruction_data: ix.data.clone(),
-                    };
-                    // Move buffers into the callback once, after filtering.
-                    if emit_candidate {
-                        events.push(DexEvent::PumpFunTrade(
-                            crate::core::events::PumpFunTradeEvent {
-                                metadata: raw.metadata,
-                                third_program: Some(crate::core::events::RawInstructionPayload {
-                                    program_id: raw.program_id,
-                                    instruction_index: raw.instruction_index,
-                                    accounts: raw.accounts,
-                                    account_indices: raw.account_indices,
-                                    instruction_data: raw.instruction_data,
-                                }),
-                                parse_status: crate::core::events::PumpFunParseStatus::Unresolved,
-                                ..Default::default()
-                            },
-                        ));
-                    } else {
-                        events.push(DexEvent::RawInstruction(Box::new(raw)));
-                    }
+                        third_program: Some(crate::core::events::RawInstructionPayload {
+                            program_id: *program,
+                            instruction_index,
+                            accounts: ix
+                                .accounts
+                                .iter()
+                                .map(|index| static_keys.get(*index as usize).copied())
+                                .collect(),
+                            account_indices: ix.accounts.clone(),
+                            instruction_data: ix.data.clone(),
+                        }),
+                        ..Default::default()
+                    }));
                 }
-            }
-            // Third-party payloads are opaque, even when their bytes happen to
-            // contain a known Pump discriminator. Do not infer internal CPIs.
-            if unknown {
+                // The wrapper's ABI and execution remain the caller's concern.
                 continue;
             }
         }
@@ -768,6 +802,11 @@ fn parse_transaction_pump_events_with_filter(
             && static_keys.get(ix.program_id_index as usize) == Some(&PROGRAM_ID_PUBKEY)
             && ix.data.len() >= 8
         {
+            // An unavailable ALT key is valid input; an index outside the
+            // message's declared static + lookup keys is malformed.
+            if !instruction_keys_resolved(ix.program_id_index, &ix.accounts, message_key_count) {
+                continue;
+            }
             let disc = &ix.data[..8];
             let minimum = if disc == discriminators::BUY_V2
                 || disc == discriminators::BUY_EXACT_QUOTE_IN_V2
@@ -779,44 +818,6 @@ fn parse_transaction_pump_events_with_filter(
                 0
             };
             if ix.accounts.len() < minimum {
-                continue;
-            }
-        }
-        if let Some(program) = static_keys.get(ix.program_id_index as usize) {
-            if crate::instr::pump_routes::may_parse(program, &ix.data) {
-                // Route adapters always require real account identities, even
-                // in compatibility mode. Never build a route with ALT placeholders.
-                if instruction_keys_resolved(ix.program_id_index, &ix.accounts, static_keys.len())
-                    && filter.is_none_or(|f| {
-                        f.includes_pump_route(if *program == PUMPSWAP_PROGRAM_ID {
-                            crate::core::events::PumpRouteKind::MultiHopSwap
-                        } else {
-                            crate::core::events::PumpRouteKind::RapidBuy
-                        })
-                    })
-                {
-                    let accounts = build_shred_ix_accounts(static_keys, &ix.accounts);
-                    let metadata = EventMetadata {
-                        signature,
-                        slot,
-                        tx_index,
-                        grpc_recv_us: recv_us,
-                        ..Default::default()
-                    };
-                    if let Some(intent) = crate::instr::pump_routes::parse(
-                        *program,
-                        &ix.data,
-                        &accounts,
-                        metadata,
-                        instruction_index,
-                    ) {
-                        push_filtered_shred_event(
-                            events,
-                            DexEvent::PumpRouteIntent(Box::new(intent)),
-                            filter,
-                        );
-                    }
-                }
                 continue;
             }
         }
@@ -840,48 +841,7 @@ fn parse_transaction_pump_events_with_filter(
 
 // --- 单条 outer ix 解析（由原 `client.rs` 迁入） ---
 
-/// Collect only unknown outer programs without decoding any protocol payload.
-/// This unfiltered helper returns all unknown programs. Callers with a DEX
-/// subscription must filter the returned dexes. ALT addresses remain None.
-pub fn parse_transaction_unknown_instructions(
-    transaction: &VersionedTransaction,
-    signature: Signature,
-    slot: u64,
-    tx_index: u64,
-    recv_us: i64,
-    events: &mut Vec<DexEvent>,
-) {
-    let keys = transaction.message.static_account_keys();
-    for (instruction_index, ix) in transaction.message.instructions().iter().enumerate() {
-        let Some(&program_id) = keys.get(ix.program_id_index as usize) else {
-            continue;
-        };
-        if !is_unknown_program_for_raw(&program_id) {
-            continue;
-        }
-        events.push(DexEvent::RawInstruction(Box::new(crate::core::events::RawInstructionEvent {
-            metadata: EventMetadata {
-                signature,
-                slot,
-                tx_index,
-                grpc_recv_us: recv_us,
-                recent_blockhash: Some(transaction.message.recent_blockhash().to_string()),
-                ..Default::default()
-            },
-            dexes: crate::core::events::raw_instruction_dexes(
-                program_id,
-                &ix.accounts.iter().map(|i| keys.get(*i as usize).copied()).collect::<Vec<_>>(),
-            ),
-            program_id,
-            instruction_index,
-            accounts: ix.accounts.iter().map(|i| keys.get(*i as usize).copied()).collect(),
-            account_indices: ix.accounts.clone(),
-            instruction_data: ix.data.clone(),
-        })));
-    }
-}
-
-pub(crate) fn is_unknown_program_for_raw(program: &Pubkey) -> bool {
+fn is_third_party_program(program: &Pubkey) -> bool {
     *program != PROGRAM_ID_PUBKEY
         && !supported_unified_outer_programs().contains(program)
         && !is_infrastructure_program(program)
@@ -930,7 +890,7 @@ fn parse_pumpfun_instruction(
         )?;
         match &mut ev {
             DexEvent::PumpFunBuy(t) | DexEvent::PumpFunSell(t) => {
-                t.is_created_buy = created_mints.contains(&t.mint);
+                t.is_created_buy = t.is_buy && created_mints.contains(&t.mint);
                 t.mayhem_mode = mayhem_mints.contains(&t.mint);
             }
             _ => {}
@@ -2715,6 +2675,60 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], DexEvent::RaydiumCpmmSwap(_)));
+    }
+
+    #[test]
+    fn shred_v3_accepts_remaining_accounts_and_preserves_idl_inputs() {
+        use crate::grpc::types::EventType;
+        let mut keys: Vec<_> = (0..20).map(|_| Pubkey::new_unique()).collect();
+        keys[16] = PROGRAM_ID_PUBKEY;
+        for (disc, name) in [
+            (discriminators::BUY_V3, "buy_v3"),
+            (discriminators::BUY_EXACT_QUOTE_IN_V3, "buy_exact_quote_in_v3"),
+            (discriminators::SELL_V3, "sell_v3"),
+        ] {
+            for count in [17, 20] {
+                let mut data = disc.to_vec();
+                data.extend_from_slice(&123u64.to_le_bytes());
+                data.extend_from_slice(&456u64.to_le_bytes());
+                if disc != discriminators::SELL_V3 {
+                    data.push(1);
+                }
+                let filter = EventTypeFilter::include_only(vec![EventType::PumpFunTrade]);
+                let mut events = Vec::new();
+                dispatch_shred_outer(
+                    16,
+                    &ix_accounts(count),
+                    &data,
+                    &keys,
+                    Signature::default(),
+                    123,
+                    77,
+                    456,
+                    Some(&filter),
+                    &PumpMintSet::new(),
+                    &PumpMintSet::new(),
+                    &mut events,
+                    false,
+                );
+                assert_eq!(events.len(), 1, "{name}: accounts={count}");
+                let DexEvent::PumpFunTrade(t) = &events[0] else { panic!("trade") };
+                assert_eq!(t.ix_name, name);
+                assert_eq!((t.mint, t.user, t.bonding_curve), (keys[1], keys[8], keys[5]));
+                assert_eq!(t.user_volume_accumulator, keys[11]);
+                assert_eq!(t.fee_config, keys[12]);
+                assert_eq!(t.buyback_fee_recipient, keys[13]);
+                assert_eq!((t.metadata.tx_index, t.metadata.grpc_recv_us), (77, 456));
+                if disc == discriminators::BUY_EXACT_QUOTE_IN_V3 {
+                    assert_eq!((t.spendable_quote_in, t.min_tokens_out), (123, 456));
+                } else if disc == discriminators::BUY_V3 {
+                    assert_eq!((t.amount, t.max_sol_cost), (123, 456));
+                } else {
+                    assert_eq!((t.amount, t.min_sol_output), (123, 456));
+                }
+                assert!(t.third_program.is_none());
+            }
+        }
     }
 
     #[test]

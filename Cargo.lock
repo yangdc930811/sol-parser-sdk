@@ -4236,7 +4236,7 @@ dependencies = [
 
 [[package]]
 name = "sol-parser-sdk"
-version = "0.8.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "base58-turbo",
@@ -4262,6 +4262,7 @@ dependencies = [
  "serde_json",
  "smallvec",
  "solana-account 4.3.2",
+ "solana-address-lookup-table-interface",
  "solana-client",
  "solana-clock",
  "solana-entry",

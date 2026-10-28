@@ -23,7 +23,6 @@ fn confirmed_dlmm_instruction_limits_are_not_execution_prices() {
         amount_out: 20_000_000,
         // These are nonzero wire limits in legacy exact-out, even on success.
         event_version: 0,
-        parse_status: TradeParseStatus::ExecutionConfirmed,
         metadata: EventMetadata { slot: 100, grpc_recv_us: NOW, ..Default::default() },
         ..Default::default()
     });
@@ -62,7 +61,6 @@ fn swap(pool: Pubkey, input: Pubkey, output: Pubkey, amount_in: u64, amount_out:
         output_amount: amount_out,
         input_vault_before: 1_000_000_000,
         output_vault_before: 1_000_000_000,
-        parse_status: TradeParseStatus::ExecutionConfirmed,
         metadata: EventMetadata { slot: 100, grpc_recv_us: NOW, ..Default::default() },
         ..Default::default()
     })
@@ -76,7 +74,6 @@ fn reference() -> DexEvent {
         post_sqrt_price: 1u128 << 64,
         input_amount: 1_000_000_000,
         output_amount: 150_000_000,
-        parse_status: TradeParseStatus::ExecutionConfirmed,
         metadata: EventMetadata { slot: 99, grpc_recv_us: NOW, ..Default::default() },
         ..Default::default()
     })
@@ -131,16 +128,15 @@ fn same_transaction_reference_is_not_used_without_cpi_order() {
 }
 
 #[test]
-fn unconfirmed_unsupported_wrong_pool_zero_and_out_of_order_are_rejected() {
+fn instruction_limits_unsupported_wrong_pool_zero_and_out_of_order_are_rejected() {
     let (mut tracker, mint, pool) = setup(USDC);
     let trade = swap(pool, USDC, mint, 300_000_000, 100_000_000);
-    for status in [TradeParseStatus::Unresolved, TradeParseStatus::InstructionDecoded] {
-        let mut event = trade.clone();
-        if let DexEvent::RaydiumCpmmSwap(e) = &mut event {
-            e.parse_status = status;
-        }
-        assert!(tracker.process(&event, NOW).is_none());
+    let mut instruction = trade.clone();
+    if let DexEvent::RaydiumCpmmSwap(e) = &mut instruction {
+        e.input_vault_before = 0;
+        e.output_vault_before = 0;
     }
+    assert!(tracker.process(&instruction, NOW).is_none());
     assert!(tracker.process(&swap(pool, USDC, mint, 0, 1), NOW).is_none());
     assert!(tracker.process(&swap(Pubkey::new_unique(), USDC, mint, 1, 1), NOW).is_none());
     assert!(tracker.process(&swap(pool, Pubkey::new_unique(), mint, 1, 1), NOW).is_none());
@@ -193,12 +189,12 @@ fn default_is_disabled_and_catalog_has_multiple_identity_sources() {
     assert!(StockPriceTracker::new(Default::default()).is_ok());
     assert!(StockPriceConfig::default().catalog.tokens.is_empty());
     let catalog = StockTokenCatalog::screened_defaults();
-    assert_eq!(catalog.tokens.len(), 34);
-    assert_eq!(catalog.pools.len(), 63);
+    assert_eq!(catalog.tokens.len(), 33);
+    assert_eq!(catalog.pools.len(), 58);
     assert!(catalog.tokens.iter().any(|t| t.catalog_source.contains("xstocks")));
     assert!(catalog.tokens.iter().any(|t| t.catalog_source.contains("backpack")));
     assert!(catalog.tokens.iter().any(|t| t.symbol == "SPHR.US"));
-    for symbol in ["BABA.US", "INTCx", "QQQx", "COPX.US", "GMEx", "INTC.US", "SPCX.US"] {
+    for symbol in ["BABA.US", "INTCx", "QQQx", "GMEx", "INTC.US", "SPCX.US"] {
         assert!(catalog.tokens.iter().any(|t| t.symbol == symbol));
     }
     for symbol in ["HIMS.US", "AMD.US", "RACE.US", "RDDT.US"] {
@@ -276,7 +272,10 @@ fn signed_mainnet_stock_prices_match_cpi_transfers_and_rpc_grpc_agree() {
             events.iter().filter_map(|e| tracker.process(e, NOW)).collect::<Vec<_>>()
         };
         let grpc_prices = prices(&grpc);
-        assert_eq!(grpc_prices.len(), 1, "{}", case["name"]);
+        // The historical ABNB pool was removed after a large withdrawal; its
+        // raw trade still parses but must not produce a default stock price.
+        let expected = usize::from(case["pool"] != "52PqYh77gmA6AbM5Hs6gHe9mhGBey5CwmD7sDybaYj27");
+        assert_eq!(grpc_prices.len(), expected, "{}", case["name"]);
         let rpc_prices = prices(&rpc_events);
         assert_eq!(rpc_prices.len(), grpc_prices.len());
         for (price, other) in grpc_prices.iter().zip(&rpc_prices) {
@@ -301,5 +300,5 @@ fn signed_mainnet_stock_prices_match_cpi_transfers_and_rpc_grpc_agree() {
             total += 1;
         }
     }
-    assert_eq!(total, 3);
+    assert_eq!(total, 2);
 }

@@ -55,9 +55,11 @@
 //!
 //! ## 限制说明
 //! ShredStream 相比 gRPC 订阅有以下限制：
-//! - 默认跳过未解析的 ALT 指令账户；通过缓存 resolver 或 loaded-addresses API 补齐。显式 best-effort API 保留旧版占位行为。
-//! - 官方多跳输出 `PumpRouteIntent`；第三方指令引用 Pump.fun 时输出 `Unresolved`
-//!   的 `PumpFunTrade` 候选并携带原始指令，不推断内部 CPI；其它第三方指令保留 `RawInstruction`。
+//! - 已确认程序 ID 的 Pump.fun 外层指令可在 ALT 未展开时回调，缺失账户为默认值。
+//!   其它 DEX 仍要求账户完整；通过缓存 resolver 或 loaded-addresses API 补齐。
+//!   默认入口不猜测未知程序，显式 best-effort API 保留旧版猜测行为。
+//! - 第三方指令自身账户引用 Pump.fun 时输出 `PumpFunTrade` 候选，
+//!   通过 `third_program` 透传原始输入，不推断内部 CPI；其它未知指令不产生事件。
 //! - 原始事件保留账户顺序、重复项和 data；未解析 ALT 账户为 None，并保留原始索引。
 //! - 无 block_time，恒为 0
 //! - tx_index 在单个 ShredStream payload 内递增，不保证等同于完整 slot 全局交易索引
@@ -65,12 +67,12 @@
 pub mod client;
 pub mod config;
 pub mod proto;
-pub(crate) mod pump_ix;
+pub mod pump_ix;
+pub(crate) mod pump_multi_hop;
 
 pub use client::{AddressLookupResolver, ShredStreamClient};
 pub use config::ShredStreamConfig;
 pub use pump_ix::{
     parse_transaction_dex_events, parse_transaction_dex_events_best_effort,
     parse_transaction_dex_events_with_filter, parse_transaction_dex_events_with_loaded_addresses,
-    parse_transaction_unknown_instructions,
 };

@@ -1,85 +1,190 @@
-# Wrapped Pump.fun instructions (sol-parser-sdk 0.7.19)
+# Wrapped Pump.fun transactions
 
-## Boundaries
+## Callback contract
 
-The streaming hot path never calls RPC. gRPC uses the supplied execution metadata and actual CPI instructions. Shred sees only signed outer instructions and locally resolved ALT addresses. Never populate a missing ALT address with a default key.
+Third-party input is opaque. The SDK does not infer wrapper ABIs, reorder wrapper
+accounts or reconstruct a Pump buy/sell instruction. Consumers interpret the
+original input in the trade event's `third_program`.
 
-## Callback update (v0.8.0)
+On Shred, an unknown outer program referencing Pump.fun in **that instruction's**
+accounts produces a `PumpFunTrade` candidate with its original input in `third_program`.
+This does not establish a trade, direction, mint, pool or amount: the program may
+only prepare accounts. Missing trade fields retain defaults, not proven zero fills.
+Broad PumpFunTrade subscriptions receive candidates; buy/sell-only subscriptions
+do not. Other unknown instructions are skipped, without scanning all DEX families.
 
-### Uniform trade provenance
+On gRPC/RPC, supplied execution metadata and actual Pump CPI instructions determine
+the trade. Its exact originating outer instruction fills `third_program`.
+Direct calls have no third-party payload. A successful invocation may still lack some execution amounts when logs are missing.
 
-gRPC/RPC trade events for Pump.fun, PumpSwap, LaunchLab, Raydium AMM v4/CPMM/CLMM,
-Orca Whirlpool and Meteora Pools/DAMM v2/DLMM/DBC now share `third_program` and
-`TradeParseStatus`. `PumpFunParseStatus` remains a compatibility alias.
-Use `DexEvent::third_program()` and `DexEvent::trade_parse_status()` without
-matching each protocol. solana-streamer exposes the same accessors and preserves
-the values through its bridge. Direct protocol calls keep `third_program=None`;
-wrapped calls retain the exact original outer payload. Event subscriptions still
-filter the executed DEX, not the wrapper's program ID. Identical swaps under
-different outer instructions cannot be paired during log/instruction merging.
+One outer instruction can invoke zero, one or several trades. Compare signature
+and outer instruction index rather than expecting equal Shred/gRPC event counts.
 
-`cargo run --example wrapped_trade_replay` verifies saved multi-protocol mainnet
-captures. This does not extend unknown Shred wrappers into confirmed trades:
-Pump candidates remain Unresolved and other DEX raw fallbacks remain available.
+## Original input and metadata
 
-Shred now emits a PumpFunTrade **candidate** for an unknown outer program whose own instruction accounts reference the Pump.fun program. Its `parse_status` is `Unresolved`; the default direction, mint, pool and amounts are unknown, not an actual sell or zero-size fill. This is not evidence that a trade executed: the wrapper might only create or prepare accounts. Transaction-wide account references alone do not qualify. Unresolved ALT addresses remain None; if the Pump program reference itself is unresolved, the parser cannot classify the instruction.
+`third_program: Option<RawInstructionPayload>` contains:
 
-Subscribe to the broad PumpFunTrade family (or no event filter) to receive candidates. Buy/sell-only subscriptions do not receive unknown directions. Each candidate produces one callback. Explicit RawInstruction subscriptions retain the old raw API instead of producing duplicate candidate callbacks; other DEX raw subscriptions remain supported.
+- `program_id`: original outer program.
+- `instruction_index`: outer instruction position.
+- `accounts`: original ordered addresses, including duplicates and unresolved `None` entries.
+- `account_indices`: original indices into the transaction account table.
+- `instruction_data`: unchanged instruction bytes.
 
-gRPC/RPC preserve actual Pump CPI trades and attach their originating outer instruction before merging logs and instructions. `ExecutionConfirmed` means the successful execution confirms the invocation, not that every amount is available. Native direct Pump instructions have no third_program. One outer wrapper can correspond to zero, one, or several actual Pump trades: compare signature + outer instruction_index, not total Shred/gRPC event counts.
+Transaction metadata stays on the enclosing event, including `tx_index`,
+`grpc_recv_us` and `recent_blockhash`. A local Shred index is not confirmed
+slot-wide execution order. Cached loaded addresses may be supplied for ALT
+resolution; the parsing hot path never calls RPC.
 
-Third-party parameter reconstruction remains **explicit opt-in**. Load reviewed rules once at startup. Adapt a candidate using `candidate.third_program.as_ref().unwrap().with_metadata(candidate.metadata.clone())`, then call the wrapper parser with the subscription filter. A successful reconstruction has `InstructionDecoded` status; a miss leaves the original unresolved candidate available to the caller. Do not feed confirmed gRPC trades through these rules.
+## Pump.fun program ID stored in ALT
 
-`third_program` is now a RawInstructionPayload containing `program_id`, `instruction_index`, original ordered `accounts` (including duplicates and unresolved None entries), `account_indices`, and byte-vector `instruction_data`. It has no metadata or dexes fields: metadata remains on the enclosing trade. JSON uses arrays for instruction bytes and account indices, and null for unresolved accounts. Rule IDs remain in the caller's rule registry.
+`pump_ix::parse_transaction_dex_events_with_filter` reads static account keys only.
+If a wrapper's Pump.fun program reference lives in an address lookup table, this
+entry point cannot identify the referenced DEX and may return no events. The
+wrapper's name or discriminator is insufficient evidence. `third_program` retains
+an identified wrapper's input; it does not resolve missing addresses.
 
-For an explicitly reconstructed trade, `ix_name` uses the Pump.fun IDL method name and input fields such as `spendable_quote_in` and `min_tokens_out` are available. `sol_amount`, `quote_amount`, and `token_amount` stay zero because Shred cannot establish executed amounts. Metadata, including tx_index, receive time, and recent_blockhash, is retained.
+For a manually supplied transaction, resolve its lookups from a prewarmed local
+cache, then call the existing loaded-addresses entry point:
 
-Migration: third_program's shape changed from the previously published program/index/rule_id structure. Update struct literals and consumers reading rule_id. Read parse_status before interpreting defaults. Old serialized trades without parse_status default to InstructionDecoded; they are not retroactively treated as execution-confirmed. RawInstructionEvent and its protocol filters remain available for compatibility.
-
-The initial rule engine supports fixed two-u64 v2 inputs. Runtime-balance-dependent parameters and unsupported wrapper layouts remain unresolved candidates. Existing official multi-hop/CurveSwap route intents are unchanged. Exact program, data length and guarded bytes, account count, canonical keys and aliases must match. A program upgrade can change semantics without changing this shape; rules are not a guarantee of future CPI behavior.
-
-## Offline analysis
-
-In the Rust sol-parser-sdk repository:
-
-```sh
-cargo run --example wrapped_pumpfun_rpc_analyzer
-SOLANA_RPC_URL=https://YOUR_RPC cargo run --example wrapped_pumpfun_rpc_analyzer -- SIGNATURE
-cargo run --example wrapped_pumpfun_replay
-cargo test --test wrapped_pumpfun --test pump_execution
+```rust,ignore
+// `loaded` is a slot-valid local-cache result for this transaction's lookups.
+// Both vectors follow message lookup order; never perform RPC in this call path.
+sol_parser_sdk::shredstream::pump_ix::parse_transaction_dex_events_with_loaded_addresses(
+    &created_tx,
+    &loaded.writable,
+    &loaded.readonly,
+    sign,
+    observer_info.create_slot,
+    888,
+    observer_info.grpc_recv_us,
+    event_filter,
+    &mut events,
+)?;
 ```
 
-Only the analyzer example's signature-fetch branch accesses RPC. The library analyzer consumes an already fetched transaction. It matches actual Pump CPI instruction bytes (not executed TradeEvent amounts), infers account maps and exact byte guards, and emits a **candidate** rule. Missing, ambiguous or runtime-derived parameters produce an explicit rejection. Candidates never install themselves. Validate each candidate on independent signatures and retain separate rules for different byte patterns; do not wildcard unexplained bytes.
+For SDK-managed subscriptions, configure `ShredStreamClient::with_address_lookup_resolver`
+with the same local cache. Preload/update tables outside the receive task. Supplying
+another transaction's loaded addresses or guessing missing keys is unsafe; a cache
+miss needs to be tracked separately from a successfully parsed empty result.
 
-`wrapped_pumpfun_replay` uses signed saved mainnet wire data and compares the gRPC execution path with the Shred outer-only path. It accepts `--fixture FILE` and `--rules FILE`. Saved execution metadata is an offline oracle only, never an input to the hot wrapper parser.
+The signed reports `2EUPDVEH…` and `38NiGzWa…` use GMGN's
+`GMgnVFR8Jb39LoXsEVzb3DvBy3ywCmdmJquHUy1Lrkqb` program and lookup table
+`58tUNfyBtwkMeU8gpyZYKEo4Hyb4E25ui12w5vKYQx3P`. Each contains **three**
+successful Pump.fun `buy` CPIs, from outer instructions 3, 6 and 9 (zero-based).
+With static keys alone, both yield zero Pump callbacks; with the saved ALT snapshot,
+each yields three Shred candidates with the original `third_program`.
+gRPC yields three executed buys with actual nonzero amounts.
+The Shred candidates still carry unknown/default trade fields, not inferred buys.
 
-## Verified transactions
+Reproduce only these two signed captures without a network:
 
-Reported signatures:
+```sh
+cargo run --offline --example pump_execution_replay -- --reported-alt
+```
 
-- `5hKonDfdNj283yidV77Ptfe1oJsPB9XXBQ6mJPtpbXVe9b6UhwBedVkX6tAaTwschTHYMeqUwt7bXeiHAzRob62p`
-- `2r4uXUJtSsphTBuJHJm2T5kKe9c215MCVL4bZ1mUZEZ6cT5698s3xFUfHb4TfU4ZfJ6cuFppQfYZUpMP5QL9pZ1Q`
-- `3nMXPjA7xRFmCeq3jypeWaXe9bmP5Fkwkvy6u74bBZHe316qMXNaE5aDQwDB1HRVLSkmk3BjgRCKBNcPEMeXrGWj`
+Each row prints `event_count`: `shred_static_pump` is 0, `shred_resolved` is 3,
+and each gRPC mode is 3. The full signatures are
+`2EUPDVEHJjJjE2GUMFonmeas1oGN7dpvx5Ni8W5tpxC4iekAVWE9UvmZvEMMNh8S4bEcFv8r1NyGFRsZEaWW5ySo`
+and `38NiGzWamkJGr3HME3FgVQQw9dSG9sBkKgVYPb3EESBqYbbJbiQ9P7Jv4Zdci9SrbnjZGJoGecAti9CmSkUusLvi`.
+This replays signed inputs and saved ALT addresses; it is not live Shred reception.
 
-Additional mainnet captures, slots 458801397–458801420:
+For future live transactions, the existing subscription example now preloads
+real ALT accounts at startup and supplies its in-memory resolver to the client:
 
-- `5wM2Jk6eDSc42mtaSWrVavAuo6rZDpR3LmWK4BeJMqrt6B5xiEE6YzpHv5qdHJsHt7crLEM1L8P5r53ndRBespvC`
-- `2KBsKB7xmfFz3qLB6U3YMTuc2Z8W3WYrEJhxqvtNytqw2co2W3zQizTPzMtC1c37NnaCuKpaoaxiT6QT4pqmF5nW`
-- `5rY6dXEjgr7m5KymyNUP1GQxegrFf8GsM9263y35b6AxQ4e5d1nmHDpj2QACqnE5eZoFPn5vNmz17nbXGXtDZR9w`
-- `4dG9FmeZjtKDiH1asJgWy8PJZAfqd96hiZRyFfjNn1g2JosLG1iwgpMgi95bygVX9jUgNW3oRDwt61q4yrjKSe2B`
+```sh
+SOLANA_RPC_URL=https://YOUR_RPC cargo run --example shredstream_example -- \
+  --endpoint http://127.0.0.1:10800 --filter trade \
+  --alt-table 58tUNfyBtwkMeU8gpyZYKEo4Hyb4E25ui12w5vKYQx3P
+```
 
-The original Rapid transaction has three reconstructable buys, with u64 arguments at outer offsets 1 and 33. Recent buys differ at guarded byte 13 (15 versus 255), so the examples keep two distinct rules. The recent rule is inferred from 5rY6… and tested against independent signature 4dG9…. Five total buys match their actual CPI data and ordered accounts. The older rule is demonstrated by three calls in one signature; it does not have independent-signature validation in this corpus.
+Add `--preload-only` to verify startup fetching without a Shred endpoint.
+Repeat `--alt-table` for additional tables. `examples/support/alt_cache.rs` shows
+the concrete `preload` and `resolve` implementation for both SDK-managed and
+manual parsing. It is example code, not a new SDK API. It rejects deactivating
+tables rather than guessing their cooldown and rejects newer-than-transaction
+snapshots. Startup snapshots do not auto-refresh; production cache updates belong
+outside the receive task. Resolver failures are counted independently of events.
+Use `--filter trade`; an opaque wrapper cannot establish a buy-only match.
 
-J7's first instruction in 5hKon… performs token-account/transfer work, with no Pump trade CPI. Its later buy passes 3,551,960 quote units to Pump, a value absent from its outer data. This cannot be restored by replacing the discriminator; the analyzer returns no rule. The captured Rapid sells also fail parameter inference. These wrappers can still produce unresolved Shred candidates when their own accounts reference Pump; gRPC reports only actual Pump trades with original wrapper data.
+中文：这两笔不是过滤器漏掉买单，而是 Pump.fun 的 program ID 在 ALT 中，静态账户入口
+无法确认它们引用了哪个 DEX。把本地预热缓存解析出的地址传入上述入口，或在订阅客户端
+配置缓存 resolver，即可收到 `third_program != None` 的回调。每笔实际有 3 次买入；
+Shred 仍不推断第三方合约的内部买卖方法和金额。热路径不请求 RPC。
 
-gRPC regression tests cover the reported transactions, recent captures and existing multi-hop fixtures; full/missing/truncated logs, repeated trades, failed transactions, metadata and filtering. Fixed: create-buy context is derived from outer/CPI create instructions per mint, not a transaction-wide log hint; versioned instruction names are no longer overwritten by generic event-log names.
+## Removed interfaces
 
-## Other repositories
+`DexEvent::PumpRouteIntent`, `DexEvent::RawInstruction`, their subscription
+variants and their route/raw parsers have been removed. Remove those subscriptions
+and match arms. Subscribe to PumpFunTrade and inspect `third_program` instead. There is no separate raw callback or built-in wrapper-rule
+engine. Official multi-hop instructions no longer emit route-intent callbacks;
+their executed trade legs remain available through gRPC/RPC.
 
-- sol-shred-sdk: `cargo run --example wrapped_pumpfun_replay` verifies signed wires and exact CPI correspondence offline.
-- TypeScript: `npx tsx examples/wrapped_pumpfun_replay.ts`; `npx tsx examples/pump_execution_replay.ts [SIGNATURE]`.
-- Python: `python examples/wrapped_pumpfun_replay.py`; `python examples/pump_execution_replay.py [SIGNATURE]`.
-- Go (repository root): `go run ./examples/wrapped_pumpfun_replay`; `go run ./examples/pump_execution_replay [SIGNATURE]`.
-- solana-streamer: uses the corrected local parser and preserves `third_program` through its event bridge. It does not enable third-party rules automatically.
+Other existing native DEX parsers and gRPC trade provenance remain unchanged.
+The stock-price configuration's `RawInstructionDexType` identifiers remain for
+compatibility; they do not cause raw-instruction parsing or hot-path DEX scans.
 
-The Rust analyzer's JSON rules can be consumed by all four parser implementations. Tests and wrapper examples are offline by default. Passing a signature to an execution/analyzer tool enables an explicit offline RPC fetch, not a request from the parsing hot path.
+## Focused offline verification
+
+Run from this repository:
+
+```sh
+cargo test --offline --lib wrapped_pumpfun_rpc_analyzer
+```
+
+`src/wrapped_pumpfun_rpc_analyzer.rs` is now a test-only module, not an RPC
+analyzer API. It replays nine saved signed transactions, including the reported
+`5hKon…`, `3nMX…` and `2r4u…` signatures. It verifies original programs,
+indices, account order, bytes, metadata and subscription boundaries.
+
+The Shred side receives signed transaction bytes and an already-loaded ALT
+snapshot only; execution metadata is used by the gRPC side. This tests the parser
+offline, not live UDP reception, shred reassembly or current mainnet behavior.
+
+## Creation order, V3 and execution amounts
+
+When a creation event is recovered from CPI because its log is missing, it is
+delivered before trades of that mint. Trade and multi-hop leg order is retained.
+Native `buy_v3`, `buy_exact_quote_in_v3` and `sell_v3` accept additional accounts
+after the 17 IDL accounts. This does not decode opaque third-party instructions.
+
+Both parser features classify V3 CPI events consistently, so buy/sell filters
+retain their executed amounts even without logs. Amounts come from execution
+events; missing execution evidence still leaves amounts unknown/default, never
+replaced with an input budget. Non-SOL quote amounts remain in `quote_amount`.
+
+```sh
+cargo test --offline --test pump_execution
+cargo test --offline --test pump_execution --no-default-features --features parse-zero-copy
+cargo test --offline --lib shred_v3_accepts
+cargo run --offline --example pump_execution_replay
+```
+
+The example prints Shred input decoding and gRPC replay with full, missing,
+truncated and missing-create logs. Pass a signature and set `SOLANA_RPC_URL` to
+fetch another transaction outside the parsing hot path. The V3 name/remaining-
+account boundary tests are explicitly constructed cases, alongside saved
+transaction replay; they are not additional mainnet captures.
+
+## Official PumpSwap multi-hop
+
+PumpSwap's `multi_hop_swap` can include both AMM and Pump.fun bonding-curve hops.
+Shred parsing emits a `PumpFunTrade` for each curve whose canonical PDA can be
+identified from the documented five-account hop layout. All-AMM routes do not
+produce PumpFun callbacks merely because the fixed accounts contain the Pump program.
+The callback retains `third_program`, mint, quote mint, curve accounts and
+`ix_name = "multi_hop_swap"`. A continuous mint path can establish direction. A disconnected or ambiguous path
+leaves direction unknown. Neither case establishes execution. Per-hop executed amounts remain zero on Shred; the raw
+outer data contains the route's input amount and final minimum, not per-hop fills.
+
+gRPC preserves each on-chain TradeEvent's `sol_amount`, `quote_amount` and
+`token_amount`. For a token-quoted curve, `sol_amount = 0` is valid; read
+`quote_mint` and `quote_amount` instead. The official per-hop event name is
+`multi_hop_swap`, even though the internal Pump CPI is `multi_hop_curve_swap`.
+
+中文：官方多跳现在按内盘各跳回调，并保留原始路由输入。Shred 中成交量为零表示尚无执行数据；
+gRPC 的非 SOL 报价交易应读取 `quote_amount`，不能把整个路由花费的 SOL 当作内盘这一跳的 SOL 金额。
+
+`cargo run --offline --example pump_execution_replay` includes the signed report
+`g1fC9wYKdndDZAyMCWkfFAqUNBCzj1brvNb3aAnRjxkrVhaSzsvELXFXz11U3DdmbM2AeFbwcaSgG86BqxApvFZ`.
+It replays transaction inputs and saved execution metadata; it does not test live shred reception.
+See the [official instruction documentation](https://github.com/pump-fun/pump-public-docs/blob/main/docs/instructions/MULTI_HOP_SWAP.md).
