@@ -144,10 +144,15 @@ async fn run_example(
     let mut client = ShredStreamClient::new_with_config(endpoint, config).await?;
     if let Some(cache) = cache {
         let failures = Arc::clone(&alt_resolution_failures);
-        client = client.with_address_lookup_resolver(move |transaction, slot| {
+        client = client.with_address_lookup_resolver(move |transaction, slot, recv_us, tx_index, event_type_filter| {
             let result = cache.resolve(transaction, slot);
-            if result.is_err() {
-                failures.fetch_add(1, Ordering::Relaxed);
+            if let Err(error) = &result {
+                let count = failures.fetch_add(1, Ordering::Relaxed) + 1;
+                // Handle/enqueue misses here if needed. Only this error path
+                // formats diagnostics; never fetch RPC or block the receive task.
+                if count <= 10 || count.is_power_of_two() {
+                    eprintln!("ALT resolution failed: slot={slot} recv_us={recv_us} tx_index={tx_index} filter={event_type_filter:?} failures={count}: {error}");
+                }
             }
             result.map_err(Into::into)
         });

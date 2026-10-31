@@ -317,6 +317,20 @@ whitespace is trimmed. Invalid metadata is logged as a subscription error withou
 sending a subscribe request. The `shredstream_example` and `shredstream_pump_snipe` examples
 read this value from `SHREDSTREAM_X_TOKEN`.
 
+`with_address_lookup_resolver` takes
+`|transaction, slot, recv_us, tx_index, event_type_filter| -> AnyResult<LoadedAddresses>`.
+Existing two-argument callbacks must add the last three arguments (use `_` if unused).
+The timestamp/index match the emitted event metadata; the filter is borrowed without
+cloning. `recv_us` is a local receive timestamp in microseconds, and `tx_index` is
+local to the received entries batch, not an on-chain slot index. Only transactions
+with lookups invoke the resolver. On a miss, inspect
+`transaction.message.address_table_lookups()` for table keys and requested indices,
+handle the transaction yourself or enqueue it for a background worker, then return
+`Err` to skip SDK parsing of that transaction without stopping the stream. Async
+handoff requires owning the transaction/filter (clone only on that error path).
+Never perform RPC or blocking work in the resolver. See
+[`shredstream_example`](examples/shredstream_example.rs) for cache-miss diagnostics.
+
 **ShredStream Limitations:**
 - Known Pump.fun outer instructions still emit create/trade callbacks when ALT accounts are unavailable. Missing addresses (including V2/V3 quote mints and token programs) remain `Pubkey::default()`; instruction arguments are not confirmed fills. Other DEX instructions require resolved accounts. Supply cached ALT addresses with `parse_transaction_dex_events_with_loaded_addresses` or `with_address_lookup_resolver` for complete accounts. The default parser does not guess unknown programs; only the explicit `best_effort` API permits discriminator guesses.
 - Third-party wrappers whose Pump.fun program reference is in ALT require that local-cache resolution too; the static-only entry point cannot identify their DEX. See the [GMGN replay and replacement call](docs/wrapped-pumpfun.md#pumpfun-program-id-stored-in-alt).

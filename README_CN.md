@@ -301,6 +301,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 `shredstream_example` 和 `shredstream_pump_snipe` 示例从环境变量
 `SHREDSTREAM_X_TOKEN` 读取该配置。
 
+`with_address_lookup_resolver` 的回调签名为
+`|transaction, slot, recv_us, tx_index, event_type_filter| -> AnyResult<LoadedAddresses>`。
+原来的双参数闭包需补齐后三个参数；不使用时写 `_`。时间和序号与事件 metadata
+保持一致，过滤器直接借用，不做克隆。`recv_us` 是本地接收时间（微秒），`tx_index`
+是本批 entries 消息内的序号，并非链上 slot 内序号。仅含 lookup 的交易触发回调。
+缓存 miss 时，可读取 `transaction.message.address_table_lookups()` 的表地址及索引，
+自行处理或放入后台队列后返回 `Err`；SDK 跳过该笔解析，后续交易继续处理。
+后台处理需持有交易和过滤器的所有权，可仅在错误分支克隆；resolver 内不要执行 RPC
+或阻塞操作。缓存 miss 的诊断示例见
+[`shredstream_example`](examples/shredstream_example.rs)。
+
 **ShredStream 限制：**
 - 已确认程序 ID 的 Pump.fun 外层指令在 ALT 未展开时仍回调创建/交易事件，缺失账户（含 V2/V3 报价 mint、Token Program）保留 `Pubkey::default()`；指令参数不代表实际成交。其它 DEX 仍要求账户完整。可用 `parse_transaction_dex_events_with_loaded_addresses` 或 `with_address_lookup_resolver` 从调用方缓存补齐；默认入口不猜测未知程序，只有显式 `best_effort` 入口允许按 discriminator 猜测。
 - 第三方包装指令若把 Pump.fun program ID 放在 ALT 中，同样需要上述本地缓存解析；仅静态账户的入口无法识别它引用的 DEX。参见 [GMGN 真实交易回放及替换调用方式](docs/wrapped-pumpfun.md#pumpfun-program-id-stored-in-alt)。

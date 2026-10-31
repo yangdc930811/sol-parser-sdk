@@ -66,6 +66,13 @@ For SDK-managed subscriptions, configure `ShredStreamClient::with_address_lookup
 with the same local cache. Preload/update tables outside the receive task. Supplying
 another transaction's loaded addresses or guessing missing keys is unsafe; a cache
 miss needs to be tracked separately from a successfully parsed empty result.
+The resolver receives `(transaction, slot, recv_us, tx_index, event_type_filter)`:
+the local timestamp, batch-local index and borrowed filter are exactly those used
+by the parser. On a cache miss, inspect the transaction's lookup table keys/indices
+or call your own parser with this context before returning `Err`. This skips SDK
+parsing of that transaction, so a caller-handled result is not emitted twice.
+For asynchronous retry, clone the transaction/filter only on the miss path and
+use a bounded queue; the resolver itself must remain nonblocking and RPC-free.
 
 The signed reports `2EUPDVEH…` and `38NiGzWa…` use GMGN's
 `GMgnVFR8Jb39LoXsEVzb3DvBy3ywCmdmJquHUy1Lrkqb` program and lookup table
