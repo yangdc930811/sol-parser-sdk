@@ -61,8 +61,9 @@ impl AltCache {
             readonly: Vec::with_capacity(lookups.iter().map(|l| l.readonly_indexes.len()).sum()),
         };
         for lookup in lookups {
-            let table = self.0.get(&lookup.account_key).context("ALT cache miss")?;
-            ensure!(slot >= table.snapshot_slot, "ALT snapshot is newer than transaction");
+            let key = lookup.account_key;
+            let table = self.0.get(&key).with_context(|| format!("ALT cache miss: {key}"))?;
+            ensure!(slot >= table.snapshot_slot, "ALT {key} snapshot is newer than transaction");
             let active_len = if slot > table.last_extended_slot {
                 table.addresses.len()
             } else {
@@ -75,7 +76,7 @@ impl AltCache {
                 for &index in indices {
                     ensure!(
                         (index as usize) < active_len,
-                        "ALT index unavailable; refresh cache outside receive task"
+                        "ALT {key} index {index} unavailable; refresh cache outside receive task"
                     );
                     destination
                         .push(*table.addresses.get(index as usize).context("invalid ALT index")?);

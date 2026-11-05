@@ -15,6 +15,7 @@ use solana_sdk::message::v0::LoadedAddresses;
 use solana_sdk::transaction::VersionedTransaction;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
+use tonic::metadata::MetadataValue;
 use tonic::transport::{Channel, Endpoint};
 
 use crate::core::now_micros;
@@ -60,8 +61,18 @@ fn record_shredstream_dropped_event() -> u64 {
 /// Synchronous ALT lookup from a prewarmed, slot-aware local cache. Called on
 /// the receive task; never perform RPC or blocking I/O here. Address identity
 /// and table activation at the requested slot are the caller's responsibility.
-pub type AddressLookupResolver =
-    dyn Fn(&VersionedTransaction, u64) -> crate::common::AnyResult<LoadedAddresses> + Send + Sync;
+/// Arguments: transaction, slot, recv_us, tx_index, event_type_filter. The last
+/// three values are the same local timestamp, batch-local index and borrowed
+/// filter passed to the parser. A miss can be handled here before returning Err.
+pub type AddressLookupResolver = dyn Fn(
+        &VersionedTransaction,
+        u64,
+        i64,
+        u64,
+        Option<&EventTypeFilter>,
+    ) -> crate::common::AnyResult<LoadedAddresses>
+    + Send
+    + Sync;
 
 /// ShredStream 客户端
 #[derive(Clone)]
@@ -98,10 +109,19 @@ impl ShredStreamClient {
     }
 
     /// Resolve ALT keys from a caller-owned cache before parsing. A cache miss
-    /// returns an error and skips the transaction, never emits placeholder keys.
+    /// returns an error and skips SDK parsing of the transaction. The resolver
+    /// may inspect missing lookup keys or parse the transaction itself first.
+    /// Receives (transaction, slot, recv_us, tx_index, event_type_filter); the
+    /// transaction and filter are borrowed, with no additional cloning.
     pub fn with_address_lookup_resolver<F>(mut self, resolver: F) -> Self
     where
-        F: Fn(&VersionedTransaction, u64) -> crate::common::AnyResult<LoadedAddresses>
+        F: Fn(
+                &VersionedTransaction,
+                u64,
+                i64,
+                u64,
+                Option<&EventTypeFilter>,
+            ) -> crate::common::AnyResult<LoadedAddresses>
             + Send
             + Sync
             + 'static,
@@ -257,6 +277,19 @@ impl ShredStreamClient {
             .max_decoding_message_size(config.max_decoding_message_size))
     }
 
+    fn build_subscribe_request(
+        config: &ShredStreamConfig,
+    ) -> Result<tonic::Request<SubscribeEntriesRequest>, String> {
+        let mut request = tonic::Request::new(SubscribeEntriesRequest {});
+        if let Some(token) = config.auth_token.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            let mut value = MetadataValue::try_from(token)
+                .map_err(|e| format!("Invalid ShredStream x-token metadata: {e}"))?;
+            value.set_sensitive(true);
+            request.metadata_mut().insert("x-token", value);
+        }
+        Ok(request)
+    }
+
     /// 核心事件流处理
     async fn stream_events(
         endpoint: &str,
@@ -265,8 +298,8 @@ impl ShredStreamClient {
         sink: EventSink<'_>,
         resolver: Option<&AddressLookupResolver>,
     ) -> Result<(), String> {
+        let request = Self::build_subscribe_request(config)?;
         let mut client = Self::connect_client(endpoint, config).await.map_err(|e| e.to_string())?;
-        let request = tonic::Request::new(SubscribeEntriesRequest {});
         let response = if config.request_timeout_ms > 0 {
             tokio::time::timeout(
                 Duration::from_millis(config.request_timeout_ms),
@@ -425,20 +458,21 @@ impl ShredStreamClient {
         };
         if transaction.message.address_table_lookups().is_some_and(|lookups| !lookups.is_empty()) {
             if let Some(resolver) = resolver {
-                let result = resolver(transaction, slot).and_then(|loaded| {
-                    super::pump_ix::parse_transaction_dex_events_with_loaded_addresses(
-                        transaction,
-                        &loaded.writable,
-                        &loaded.readonly,
-                        signature,
-                        slot,
-                        tx_index,
-                        recv_us,
-                        event_type_filter,
-                        events,
-                    )?;
-                    Ok(())
-                });
+                let result = resolver(transaction, slot, recv_us, tx_index, event_type_filter)
+                    .and_then(|loaded| {
+                        super::pump_ix::parse_transaction_dex_events_with_loaded_addresses(
+                            transaction,
+                            &loaded.writable,
+                            &loaded.readonly,
+                            signature,
+                            slot,
+                            tx_index,
+                            recv_us,
+                            event_type_filter,
+                            events,
+                        )?;
+                        Ok(())
+                    });
                 if let Err(error) = result {
                     log::debug!(
                         "Skipping unresolved ALT transaction {signature} at {slot}: {error}"
@@ -473,6 +507,43 @@ mod tests {
     use solana_sdk::signature::Signature;
     use solana_sdk::transaction::VersionedTransaction;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    #[test]
+    fn subscription_request_includes_only_nonempty_trimmed_auth_token() {
+        for config in [
+            ShredStreamConfig::default(),
+            ShredStreamConfig::low_latency(),
+            ShredStreamConfig::high_throughput(),
+        ] {
+            for (token, expected) in [
+                (None, None),
+                (Some(""), None),
+                (Some(" \t\n "), None),
+                (Some(" test-token "), Some("test-token")),
+            ] {
+                let config =
+                    ShredStreamConfig { auth_token: token.map(str::to_owned), ..config.clone() };
+                let request = ShredStreamClient::build_subscribe_request(&config).unwrap();
+                let header = request.metadata().get("x-token");
+                assert_eq!(header.map(|value| value.to_str().unwrap()), expected);
+                if let Some(header) = header {
+                    assert!(header.is_sensitive());
+                    assert!(!format!("{config:?}").contains("test-token"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn subscription_request_rejects_invalid_auth_without_exposing_token() {
+        for token in ["secret\nvalue", "secret\rvalue", "secret\0value", "secret\u{7f}value"] {
+            let config =
+                ShredStreamConfig { auth_token: Some(token.to_owned()), ..Default::default() };
+            let error = ShredStreamClient::build_subscribe_request(&config).unwrap_err();
+            assert!(error.contains("Invalid ShredStream x-token metadata"));
+            assert!(!error.contains("secret"));
+        }
+    }
 
     fn push_string(data: &mut Vec<u8>, value: &str) {
         data.extend_from_slice(&(value.len() as u32).to_le_bytes());
@@ -511,6 +582,140 @@ mod tests {
                 address_table_lookups: Vec::new(),
             }),
         }
+    }
+
+    fn pumpfun_create_alt_tx() -> (VersionedTransaction, LoadedAddresses) {
+        let mut transaction = pumpfun_create_tx();
+        let VersionedMessage::V0(message) = &mut transaction.message else { unreachable!() };
+        let loaded = LoadedAddresses {
+            writable: message.account_keys.drain(1..10).collect(),
+            readonly: Vec::new(),
+        };
+        message.instructions[0].program_id_index = 1;
+        message.instructions[0].accounts = std::iter::once(0).chain(2..11).collect();
+        message.address_table_lookups = vec![v0::MessageAddressTableLookup {
+            account_key: Pubkey::new_unique(),
+            writable_indexes: (0..9).collect(),
+            readonly_indexes: Vec::new(),
+        }];
+        (transaction, loaded)
+    }
+
+    #[test]
+    fn resolver_receives_parser_context_across_entries_without_cloning_filter() {
+        for filtered in [false, true] {
+            let (transaction, loaded) = pumpfun_create_alt_tx();
+            let filter = Arc::new(EventTypeFilter::include_only(vec![
+                crate::grpc::EventType::PumpFunCreate,
+            ]));
+            let expected_filter = Arc::clone(&filter);
+            let contexts = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let observed = Arc::clone(&contexts);
+            let resolver = move |_: &VersionedTransaction,
+                                 slot: u64,
+                                 recv_us: i64,
+                                 tx_index: u64,
+                                 filter: Option<&EventTypeFilter>| {
+                if filtered {
+                    assert!(std::ptr::eq(filter.unwrap(), expected_filter.as_ref()));
+                } else {
+                    assert!(filter.is_none());
+                }
+                observed.lock().unwrap().push((slot, recv_us, tx_index));
+                Ok(loaded.clone())
+            };
+            let entries = vec![
+                SolanaEntry {
+                    num_hashes: 1,
+                    hash: Hash::default(),
+                    transactions: vec![pumpfun_create_tx(), transaction.clone()],
+                },
+                SolanaEntry {
+                    num_hashes: 1,
+                    hash: Hash::default(),
+                    transactions: vec![transaction],
+                },
+            ];
+            let entry = Entry { slot: 42, entries: wincode::serialize(&entries).unwrap() };
+            let queue = Arc::new(ArrayQueue::new(4));
+            ShredStreamClient::process_entry_with_resolver(
+                entry,
+                filtered.then_some(filter.as_ref()),
+                &EventSink::Queue(&queue),
+                &mut Vec::new(),
+                Some(&resolver),
+            );
+            let contexts = contexts.lock().unwrap();
+            assert_eq!(contexts.len(), 2); // Static transactions never invoke the resolver.
+            let first = queue.pop().unwrap();
+            let recv_us = first.metadata().grpc_recv_us;
+            assert!(recv_us > 0);
+            assert_eq!(first.metadata().tx_index, 0);
+            for (index, event) in [queue.pop().unwrap(), queue.pop().unwrap()].iter().enumerate() {
+                assert!(matches!(event, DexEvent::PumpFunCreate(_)));
+                let metadata = event.metadata();
+                assert_eq!(
+                    contexts[index],
+                    (metadata.slot, metadata.grpc_recv_us, metadata.tx_index)
+                );
+                assert_eq!(metadata.tx_index, index as u64 + 1);
+                assert_eq!(metadata.grpc_recv_us, recv_us);
+            }
+            assert!(queue.pop().is_none());
+        }
+    }
+
+    #[test]
+    fn resolver_can_handle_cache_miss_and_skip_sdk_parsing_without_losing_next_transaction() {
+        let (transaction, _) = pumpfun_create_alt_tx();
+        let expected_lookup = transaction.message.address_table_lookups().unwrap()[0].account_key;
+        let handled = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&handled);
+        let resolver = move |transaction: &VersionedTransaction,
+                             slot: u64,
+                             recv_us: i64,
+                             tx_index: u64,
+                             filter: Option<&EventTypeFilter>| {
+            assert_eq!(
+                transaction.message.address_table_lookups().unwrap()[0].account_key,
+                expected_lookup
+            );
+            let mut fallback_events = Vec::new();
+            crate::shredstream::pump_ix::parse_transaction_dex_events_with_filter(
+                transaction,
+                transaction.signatures[0],
+                slot,
+                tx_index,
+                recv_us,
+                filter,
+                &mut fallback_events,
+            );
+            assert_eq!(fallback_events.len(), 1);
+            assert!(matches!(fallback_events[0], DexEvent::PumpFunCreate(_)));
+            let metadata = fallback_events[0].metadata();
+            assert_eq!((metadata.slot, metadata.tx_index, metadata.grpc_recv_us), (42, 0, recv_us));
+            seen.fetch_add(1, AtomicOrdering::Relaxed);
+            Err("cache miss handled by caller".into())
+        };
+        let entries = vec![SolanaEntry {
+            num_hashes: 1,
+            hash: Hash::default(),
+            transactions: vec![transaction, pumpfun_create_tx()],
+        }];
+        let entry = Entry { slot: 42, entries: wincode::serialize(&entries).unwrap() };
+        let filter = EventTypeFilter::include_only(vec![crate::grpc::EventType::PumpFunCreate]);
+        let queue = Arc::new(ArrayQueue::new(4));
+        ShredStreamClient::process_entry_with_resolver(
+            entry,
+            Some(&filter),
+            &EventSink::Queue(&queue),
+            &mut Vec::new(),
+            Some(&resolver),
+        );
+        assert_eq!(handled.load(AtomicOrdering::Relaxed), 1);
+        let event = queue.pop().unwrap();
+        assert_eq!(event.metadata().tx_index, 1);
+        assert!(queue.pop().is_none()); // The caller-handled transaction is not parsed again.
     }
 
     #[test]
